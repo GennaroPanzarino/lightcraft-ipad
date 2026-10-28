@@ -57,6 +57,15 @@ struct CropState: Equatable {
     }
 }
 
+/// A crop proportion as the menus name it: "4x5" → 4:5 (either orientation), "original", "free".
+func aspectName(_ a: String) -> String {
+    switch a {
+    case "", "free": return "Libero"
+    case "original": return "Originale"
+    default: return a.replacingOccurrences(of: "x", with: ":")
+    }
+}
+
 /// One of the photo's masks (Capture One's layers), as `develop.get` lists them.
 struct MaskInfo: Identifiable, Equatable {
     let id: Int

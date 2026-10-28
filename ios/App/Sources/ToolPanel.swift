@@ -541,7 +541,7 @@ private struct CropTool: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            MenuField(label: "Proporzioni", value: ratios.first { $0.0 == ed.cropAspect }?.1 ?? (ed.cropAspect.isEmpty ? "Libero" : ed.cropAspect)) {
+            MenuField(label: "Proporzioni", value: aspectName(ed.cropAspect)) {
                 ForEach(ratios, id: \.0) { r in
                     Button(r.1) { ed.run("crop.aspect", ["aspect": r.0]) }
                 }

@@ -284,7 +284,7 @@ private struct CropBar: View {
             Menu {
                 ForEach(ratios, id: \.0) { r in Button(r.1) { ed.run("crop.aspect", ["aspect": r.0]) } }
             } label: {
-                Label(ratios.first { $0.0 == ed.cropAspect }?.1 ?? "Libero", systemImage: "aspectratio")
+                Label(aspectName(ed.cropAspect), systemImage: "aspectratio")
                     .font(Typo.labelStrong).foregroundColor(Lc.text)
                     .padding(.horizontal, 10).frame(height: 34)
             }

@@ -637,7 +637,12 @@ final class EditorModel: ObservableObject {
         if let a = aspect as? String {
             cropAspect = a
         } else if let wh = aspect as? [Any], wh.count == 2 {
-            cropAspect = "\(Int(double(wh[0])))x\(Int(double(wh[1])))"
+            // a locked shape (500 × 400): its lowest terms (5 × 4)
+            var a = Int(double(wh[0])), b = Int(double(wh[1]))
+            var x = a, y = b
+            while y != 0 { (x, y) = (y, x % y) }
+            if x > 0 { a /= x; b /= x }
+            cropAspect = "\(a)x\(b)"
         } else {
             cropAspect = ""
         }
