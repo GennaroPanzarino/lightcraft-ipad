@@ -74,7 +74,7 @@ struct GlassIcon: View {
                 .font(.system(size: size * 0.38, weight: .medium))
                 .foregroundColor(active ? Lc.ink : Lc.text)
                 .frame(width: size, height: size)
-                .background(active ? AnyShapeStyle(Lc.amber) : AnyShapeStyle(.ultraThinMaterial))
+                .background(active ? AnyShapeStyle(Lc.amber) : AnyShapeStyle(Material.ultraThinMaterial))
                 .clipShape(Circle())
                 .overlay(Circle().stroke(Lc.hairline))
         }

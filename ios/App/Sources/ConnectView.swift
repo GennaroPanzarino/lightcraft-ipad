@@ -48,8 +48,7 @@ struct ConnectView: View {
             Spacer().frame(height: 32)
             Text("LIGHTCRAFT TETHER").font(Typo.overline).tracking(1.4).foregroundColor(Lc.amber)
             Spacer().frame(height: 12)
-            Text("Scatta.
-È già qui.").font(Typo.display).foregroundColor(Lc.text).lineSpacing(2)
+            Text("Scatta.\nÈ già qui.").font(Typo.display).foregroundColor(Lc.text).lineSpacing(2)
             Spacer().frame(height: 16)
             Text("Collega la tua Sony all'iPad via Wi-Fi: ogni scatto arriva in un istante, già con il tuo preset, e il RAW vero lo sviluppa LightCraft.")
                 .font(Typo.body).foregroundColor(Lc.text2).fixedSize(horizontal: false, vertical: true)

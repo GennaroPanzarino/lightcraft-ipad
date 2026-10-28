@@ -16,6 +16,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Swift check (a minute, before the long builds)
+        run: |
+          xcrun -sdk iphoneos swiftc -typecheck -swift-version 5 -target arm64-apple-ios15.0             -module-name LightCraftTether -import-objc-header ios/App/Bridging.h ios/App/Sources/*.swift
+
       - name: Rust for iOS
         run: |
           rustup toolchain install stable --profile minimal
@@ -24,6 +28,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: ipad
+          cache-on-failure: true
 
       - name: LightCraft core (iPad)
         env:
@@ -54,8 +59,8 @@ jobs:
           cd ios
           xcodebuild -project LightCraftTether.xcodeproj -scheme LightCraftTether -configuration Release \
             -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build 2>&1 | tee build-device.log | grep -E "error:|warning: unre|BUILD" || true
-          test -d build/Build/Products/Release-iphoneos/LightCraftTether.app
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build 2>&1 | tee build-device.log | grep -E -A3 "error:|BUILD" || true
+          test -f build/Build/Products/Release-iphoneos/LightCraftTether.app/LightCraftTether
 
       - name: IPA for TrollStore
         run: |
@@ -75,8 +80,8 @@ jobs:
           cd ios
           xcodebuild -project LightCraftTether.xcodeproj -scheme LightCraftTether -configuration Release \
             -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build-sim \
-            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build 2>&1 | tee build-sim.log | grep -E "error:|BUILD" || true
-          test -d build-sim/Build/Products/Release-iphonesimulator/LightCraftTether.app
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build 2>&1 | tee build-sim.log | grep -E -A3 "error:|BUILD" || true
+          test -f build-sim/Build/Products/Release-iphonesimulator/LightCraftTether.app/LightCraftTether
 
       - name: Sample raws (raw.pixls.us, A7 IV)
         run: |

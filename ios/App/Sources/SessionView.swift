@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 /// The session: the shot on screen (swipe for the others), the link, the strip of shots, and what to do
 /// with the shot.

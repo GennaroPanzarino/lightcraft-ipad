@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The preset every new shot gets: tiles of the shot on screen with each one.
 struct PresetSheet: View {
@@ -94,7 +95,7 @@ struct SettingsSheet: View {
                 if !model.settings.login.fingerprint.isEmpty {
                     HStack {
                         Image(systemName: "key").foregroundColor(Lc.text3)
-                        Text(model.settings.login.fingerprint.prefix(30) + "…").font(Typo.caption).foregroundColor(Lc.text3)
+                        Text(String(model.settings.login.fingerprint.prefix(30)) + "…").font(Typo.caption).foregroundColor(Lc.text3)
                         Spacer()
                         Button("Azzera") { model.settings.login.fingerprint = "" }.font(Typo.label).foregroundColor(Lc.amber)
                     }

@@ -105,6 +105,7 @@ struct ColorWheel: View {
     var onStart: () -> Void = {}
     var onEnd: () -> Void = {}
     @State private var dragging = false
+    private let hues: [Color] = stride(from: 0.0, through: 360.0, by: 60.0).map { Color(hue: $0.truncatingRemainder(dividingBy: 360) / 360, saturation: 1, brightness: 1) }
 
     var body: some View {
         GeometryReader { geo in
@@ -113,7 +114,7 @@ struct ColorWheel: View {
             let c = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
             ZStack {
                 Circle()
-                    .fill(AngularGradient(colors: stride(from: 0.0, through: 360.0, by: 60.0).map { Color(hue: $0.truncatingRemainder(dividingBy: 360) / 360, saturation: 1, brightness: 1) }, center: .center))
+                    .fill(AngularGradient(gradient: Gradient(colors: hues), center: .center, startAngle: .degrees(0), endAngle: .degrees(360)))
                     .frame(width: 2 * r, height: 2 * r)
                 Circle()
                     .fill(RadialGradient(colors: [Color(white: 0.74), Color(white: 0.74, opacity: 0)], center: .center, startRadius: 0, endRadius: r))

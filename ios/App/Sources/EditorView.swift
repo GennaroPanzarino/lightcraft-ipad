@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 /// Develop one shot: the photo large on the left, the tools in a column on the right.
@@ -83,7 +84,7 @@ struct EditorView: View {
                             .font(.system(size: 18))
                             .foregroundColor(holdingBefore ? Lc.ink : Lc.text)
                             .frame(width: 46, height: 46)
-                            .background(holdingBefore ? AnyShapeStyle(Lc.amber) : AnyShapeStyle(.ultraThinMaterial))
+                            .background(holdingBefore ? AnyShapeStyle(Lc.amber) : AnyShapeStyle(Material.ultraThinMaterial))
                             .clipShape(Circle())
                             .gesture(
                                 DragGesture(minimumDistance: 0)
@@ -211,7 +212,7 @@ struct WhitePanel: View {
     @ObservedObject var ed: EditorModel
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            FlowChips(items: (ed.wbMode == "custom" ? [("custom", "Personalizzato")] as [(String, String)] : []) + whiteModes, selected: ed.wbMode) { m in
+            FlowChips(items: ed.wbMode == "custom" ? [("custom", "Personalizzato")] + whiteModes : whiteModes, selected: ed.wbMode) { m in
                 if m != "custom" { ed.whiteBalance(m) }
             }
             .padding(.horizontal, 16).padding(.vertical, 6)

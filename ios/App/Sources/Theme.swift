@@ -65,9 +65,9 @@ enum Haptics {
     static func confirm() { UIImpactFeedbackGenerator(style: .medium).impactOccurred() }
 }
 
-extension View {
+extension Text {
     /// Small caps-like section titles.
-    func overline() -> some View {
+    func overline() -> Text {
         self.font(Typo.overline).tracking(1.2).foregroundColor(Lc.text3)
     }
 }
