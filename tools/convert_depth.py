@@ -28,6 +28,15 @@ class Depth(torch.nn.Module):
 
 
 model = AutoModelForDepthEstimation.from_pretrained("depth-anything/Depth-Anything-V2-Small-hf", torchscript=True).eval()
+
+# At 518 × 518 the patch grid is the one the position embeddings were trained on: no interpolation
+# needed. Under tracing the library interpolates anyway (bicubic, which Core ML has no op for):
+# hand back the embeddings as they are.
+embeddings = model.backbone.embeddings
+grid = embeddings.position_embeddings.shape[1] - 1
+assert grid == (SIZE // 14) ** 2, f"position embeddings for {grid} patches, not {(SIZE // 14) ** 2}"
+embeddings.interpolate_pos_encoding = lambda emb, height, width: embeddings.position_embeddings
+
 x = torch.rand(1, 3, SIZE, SIZE)
 with torch.no_grad():
     traced = torch.jit.trace(Depth(model), x, strict=False)
