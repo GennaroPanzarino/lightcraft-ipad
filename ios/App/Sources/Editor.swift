@@ -3,7 +3,7 @@ import Foundation
 
 /// What a touch on the photo does: Capture One's cursor tools.
 enum CursorTool {
-    case none, crop, spot, paint, shape, sample
+    case none, crop, spot, paint, shape, sample, focus
 }
 
 /// A line of the photo's metadata.
@@ -64,6 +64,18 @@ final class EditorModel: ObservableObject {
     private var selectNewest = false
     /// The selected layer's sliders.
     let localStore = DevelopStore()
+    /// Lightroom's Lens Blur as the photo keeps it; while a slider moves, `liveBlur` (not published:
+    /// the panel draws nothing, only the photo changes).
+    @Published private(set) var lensBlur = LensBlurState()
+    @Published private(set) var depthSource = ""
+    @Published private(set) var depthImage: CGImage?
+    @Published var showDepth = false
+    private var liveBlur: LensBlurState?
+    private var depth: DepthMap?
+    private var depthKey = ""
+    private var clean: Pic?
+    private var blurBusy = false
+    private var blurPending = false
 
     let store = DevelopStore()
     private(set) var curves: [Channel: CurvePoints] = [:]
@@ -136,6 +148,12 @@ final class EditorModel: ObservableObject {
         selectedMask = nil
         masks = []
         spots = []
+        depth = nil
+        depthKey = ""
+        depthImage = nil
+        clean = nil
+        liveBlur = nil
+        showDepth = false
         store.enabled = true
         Task {
             await loadAspect()
@@ -160,6 +178,86 @@ final class EditorModel: ObservableObject {
         photo = 0
         store.enabled = false
         localStore.enabled = false
+    }
+
+    // ---- the lens blur
+
+    /// The loupe hands the photo's pictures over while the lens blur is on: they are shown blurred.
+    func intercept(_ p: Pic) -> Bool {
+        guard p.key == key, photo != 0, (liveBlur ?? lensBlur).enabled else { return false }
+        clean = p
+        scheduleBlur()
+        return true
+    }
+
+    /// A lens blur setting while a slider moves (`live`), or for good.
+    func setLensBlur(_ s: LensBlurState, live: Bool) {
+        let was = (liveBlur ?? lensBlur).enabled
+        if live { liveBlur = s } else { liveBlur = nil; lensBlur = s }
+        if s.enabled {
+            if clean == nil || clean?.key != key, let p = loupe.pics[key], !p.filtered { clean = p }
+            scheduleBlur()
+        } else if was, var c = clean {
+            c.filtered = true
+            loupe.put(c)
+        }
+    }
+
+    /// The lens blur into the photo's settings (one undo step).
+    func commitLensBlur() {
+        if let l = liveBlur {
+            lensBlur = l
+            liveBlur = nil
+        }
+        merge(lensBlur.settings, label: "Sfocatura obiettivo")
+    }
+
+    /// Focus where the photo was touched (0…1 of the picture on screen).
+    func focus(at u: CGPoint) {
+        cursorTool = .none
+        guard let d = depth else { return }
+        var s = lensBlur
+        s.focus = Double(d.at(u))
+        s.enabled = true
+        setLensBlur(s, live: false)
+        commitLensBlur()
+    }
+
+    private func scheduleBlur() {
+        if blurBusy {
+            blurPending = true
+            return
+        }
+        guard let p = clean, p.key == key else { return }
+        blurBusy = true
+        let state = liveBlur ?? lensBlur
+        let k = "\(photo)|\(crop.rect)|\(crop.angle)"
+        Task {
+            if depth == nil || (depthKey != k && !p.draft) {
+                let small = scaled(p.image, edge: 1024)
+                let d = await DepthEstimator.shared.estimate(small)
+                if p.key == key {
+                    depth = d
+                    depthKey = k
+                    depthSource = DepthEstimator.shared.source
+                    depthImage = d?.image.flatMap { stretched($0, width: max(1, p.image.width / 2), height: max(1, p.image.height / 2)) }
+                }
+            }
+            var out = p
+            if let d = depth, state.enabled {
+                let img = p.image
+                if let b = await Task.detached(priority: .userInitiated, operation: { LensBlurRenderer.apply(img, depth: d, state) }).value {
+                    out = Pic(key: p.key, photo: p.photo, revision: p.revision, boxW: p.boxW, boxH: p.boxH, image: b, draft: p.draft)
+                }
+            }
+            out.filtered = true
+            if p.key == key { loupe.put(out) }
+            blurBusy = false
+            if blurPending {
+                blurPending = false
+                scheduleBlur()
+            }
+        }
     }
 
     // ---- crop, layers, spots (the cursor tools)
@@ -266,6 +364,7 @@ final class EditorModel: ObservableObject {
 
     private func applyState(_ d: [String: Any]) {
         crop = CropState.from(d, aspect: imageAspect)
+        if liveBlur == nil { lensBlur = LensBlurState.from(d) }
         masks = MaskInfo.list(d)
         spots = SpotInfo.list(d)
         if selectNewest {

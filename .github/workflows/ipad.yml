@@ -49,6 +49,27 @@ jobs:
           cp target/aarch64-apple-ios-sim/release/liblightcraft_ios.a ios/lib/iphonesimulator/
           ls -la ios/lib/*/
 
+      - name: Depth model cache
+        id: depth
+        uses: actions/cache@v4
+        with:
+          path: ios/App/Models/DepthAnything.mlpackage
+          key: depth-anything-v2-small-ios15-${{ hashFiles('tools/convert_depth.py') }}
+
+      - uses: actions/setup-python@v5
+        if: steps.depth.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.11"
+
+      - name: Depth model for iPadOS 15 (Depth Anything V2 Small)
+        if: steps.depth.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: |
+          python -m pip install --quiet torch==2.4.1 transformers==4.46.3 coremltools==8.1 numpy==1.26.4
+          mkdir -p ios/App/Models
+          python tools/convert_depth.py ios/App/Models/DepthAnything.mlpackage
+          du -sh ios/App/Models/DepthAnything.mlpackage
+
       - name: Xcode project
         run: |
           brew install xcodegen ldid

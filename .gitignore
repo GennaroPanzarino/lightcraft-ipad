@@ -26,3 +26,6 @@ Payload/
 *.ipa
 screens/
 samples/
+
+# the depth model is converted in CI (tools/convert_depth.py)
+ios/App/Models/

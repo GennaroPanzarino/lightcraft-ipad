@@ -8,7 +8,7 @@ import UIKit
 final class EditOverlay: UIView {
     var mode: CursorTool = .none {
         didSet {
-            isUserInteractionEnabled = [.spot, .paint, .shape, .sample].contains(mode)
+            isUserInteractionEnabled = [.spot, .paint, .shape, .sample, .focus].contains(mode)
             redraw()
         }
     }
@@ -24,6 +24,8 @@ final class EditOverlay: UIView {
     var onSpot: ((CGPoint) -> Void)?
     var onStroke: (([CGPoint], [Float]) -> Void)?
     var onSample: ((CGPoint) -> Void)?
+    /// A tap with the focus tool: where, in the picture on screen (0…1).
+    var onFocus: ((CGPoint) -> Void)?
     var onShapeBegin: (() -> Void)?
     var onShape: (([String: Any]) -> Void)?
     var onShapeEnd: (() -> Void)?
@@ -217,6 +219,8 @@ final class EditOverlay: UIView {
             if !moved { onSpot?(toImage(p)) }
         case .sample:
             if !moved { onSample?(toImage(p)) }
+        case .focus:
+            if !moved { onFocus?(CGPoint(x: p.x / max(bounds.width, 1), y: p.y / max(bounds.height, 1))) }
         case .shape:
             if dragging != nil {
                 dragging = nil

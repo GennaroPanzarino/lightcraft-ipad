@@ -191,7 +191,7 @@ private struct ViewerArea: View {
                     if ed.cursorTool == .crop {
                         CropHost(ed: ed)
                     } else {
-                        ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before)
+                        ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before ?? (ed.showDepth ? ed.depthImage : nil))
                     }
                     if let s = shot, s.stage == .arriving && s.thumb == nil && model.loupe.pics[s.key] == nil {
                         VStack(spacing: 10) {
@@ -213,7 +213,7 @@ private struct ViewerArea: View {
                     if ed.cursorTool == .crop {
                         CropBar(ed: ed)
                             .padding(.bottom, 14)
-                    } else if ed.cursorTool == .spot || ed.cursorTool == .paint || ed.cursorTool == .shape || ed.cursorTool == .sample {
+                    } else if ed.cursorTool == .spot || ed.cursorTool == .paint || ed.cursorTool == .shape || ed.cursorTool == .sample || ed.cursorTool == .focus {
                         Text(toolHint(ed.cursorTool))
                             .font(Typo.labelStrong).foregroundColor(Lc.text)
                             .padding(.horizontal, 12).frame(height: 30)
@@ -267,6 +267,7 @@ private func toolHint(_ t: CursorTool) -> String {
     case .paint: return "Dipingi la maschera · due dita per zoomare"
     case .shape: return "Trascina le maniglie del gradiente"
     case .sample: return "Tocca il colore da selezionare"
+    case .focus: return "Tocca ciò che deve restare a fuoco"
     default: return ""
     }
 }

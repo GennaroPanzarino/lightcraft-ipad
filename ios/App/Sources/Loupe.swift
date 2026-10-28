@@ -10,6 +10,8 @@ struct Pic {
     let boxH: Int
     let image: CGImage
     let draft: Bool
+    /// Already through the editor's own processing (the lens blur).
+    var filtered = false
 }
 
 /// The viewer's pictures: the shot on screen rendered for the screen (its neighbours after it), the
@@ -41,6 +43,8 @@ final class Loupe {
     var onViewer: ((Pic) -> Void)?
     /// The shot the editor is changing: its pictures come from the editor until it is done.
     var held: String?
+    /// The editor takes a picture over (it shows it once processed): true when it does.
+    var intercept: ((Pic) -> Bool)?
     static let keep = 6
 
     init(engine: Engine) { self.engine = engine }
@@ -51,10 +55,12 @@ final class Loupe {
     }
 
     func put(_ p: Pic) {
+        let taken = !p.filtered && (intercept?(p) ?? false)
         pics[p.key] = p
         order.removeAll { $0 == p.key }
         order.append(p.key)
         while order.count > Loupe.keep { pics[order.removeFirst()] = nil }
+        if taken { return }
         if p.key == viewerKey { onViewer?(p) }
         if !p.draft { onPicture?(p) }
     }

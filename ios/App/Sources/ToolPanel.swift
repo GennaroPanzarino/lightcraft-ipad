@@ -126,6 +126,7 @@ struct ToolPanel: View {
                 ToggleRow(label: "Aberrazione cromatica", on: ed.removeCA) { ed.merge(["optics": ["remove_ca": $0]], label: "Aberrazione cromatica") }
                 Sliders(store: s, ids: ["optics.distortion", "optics.vignetting", "optics.vignettingMidpoint"])
             }
+            ToolBox(id: "lensBlur", title: "Sfocatura obiettivo", state: state) { LensBlurTool(ed: ed) }
             ToolBox(id: "fringe", title: "Frange colorate", state: state) {
                 Sliders(store: s, ids: ["optics.caRed", "optics.caBlue", "optics.defringePurple", "optics.defringePurpleHueLo", "optics.defringePurpleHueHi", "optics.defringeGreen", "optics.defringeGreenHueLo", "optics.defringeGreenHueHi"])
             }
@@ -710,6 +711,62 @@ private struct ColorEditorTool: View {
             }
             Text(band.label).font(Typo.labelStrong).foregroundColor(Lc.text)
             Sliders(store: store, ids: ["mixer.\(band.rawValue).hue", "mixer.\(band.rawValue).sat", "mixer.\(band.rawValue).lum"])
+        }
+    }
+}
+
+// MARK: - Lens blur
+
+/// Lightroom's Lens Blur: the scene's depth from the Neural Engine, what stays sharp around the focus,
+/// how much the rest melts.
+private struct LensBlurTool: View {
+    @ObservedObject var ed: EditorModel
+
+    var body: some View {
+        let s = ed.lensBlur
+        VStack(alignment: .leading, spacing: 0) {
+            ToggleRow(label: "Applica", on: s.enabled) { on in
+                var n = ed.lensBlur
+                n.enabled = on
+                ed.setLensBlur(n, live: false)
+                ed.commitLensBlur()
+            }
+            Group {
+                ValueSlider(control: Control(id: "lb.amount", label: "Quantità", min: 1, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
+                            value: s.amount,
+                            onChange: { v in var n = ed.lensBlur; n.amount = v; ed.setLensBlur(n, live: true) },
+                            onEnd: { ed.commitLensBlur() })
+                    .frame(height: ToolSlider.height)
+                ValueSlider(control: Control(id: "lb.focus", label: "Messa a fuoco", min: 0, max: 100, def: 85, step: 1, decimals: 0, track: .gradient([UIColor(hex: 0x30343C), UIColor(hex: 0xE8E8EA)])),
+                            value: (s.focus ?? 0.85) * 100,
+                            onChange: { v in var n = ed.lensBlur; n.focus = v / 100; ed.setLensBlur(n, live: true) },
+                            onEnd: { ed.commitLensBlur() })
+                    .frame(height: ToolSlider.height)
+                ValueSlider(control: Control(id: "lb.range", label: "Profondità", min: 2, max: 100, def: 18, step: 1, decimals: 0, track: .plain),
+                            value: s.range * 100,
+                            onChange: { v in var n = ed.lensBlur; n.range = v / 100; ed.setLensBlur(n, live: true) },
+                            onEnd: { ed.commitLensBlur() })
+                    .frame(height: ToolSlider.height)
+                HStack(spacing: 6) {
+                    FlatButton(title: ed.cursorTool == .focus ? "Tocca la foto" : "Fuoco al tocco", icon: "scope", prominent: ed.cursorTool == .focus) {
+                        ed.picking = false
+                        ed.cursorTool = ed.cursorTool == .focus ? .none : .focus
+                    }
+                    FlatButton(title: "Soggetto", icon: "person.crop.rectangle") {
+                        var n = ed.lensBlur
+                        n.focus = nil
+                        ed.setLensBlur(n, live: false)
+                        ed.commitLensBlur()
+                    }
+                }
+                .padding(.vertical, 4)
+                ToggleRow(label: "Mostra la profondità", on: ed.showDepth) { ed.showDepth = $0 }
+            }
+            .disabled(!s.enabled)
+            .opacity(s.enabled ? 1 : 0.45)
+            Text(ed.depthSource.isEmpty ? "La profondità della scena si calcola sul Neural Engine dell'iPad." : "Profondità: \(ed.depthSource)")
+                .font(Typo.caption).foregroundColor(Lc.text3)
+                .padding(.vertical, 4)
         }
     }
 }

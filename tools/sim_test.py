@@ -83,7 +83,7 @@ for tool in ["color", "details", "adjustments", "metadata", "capture"]:
 launch()
 time.sleep(8)
 shot("04_browser_at_start")
-for t, tool in [("crop", "composition"), ("radial", "local"), ("spots", "details")]:
+for t, tool in [("crop", "composition"), ("radial", "local"), ("spots", "details"), ("lensblur", "lens")]:
     launch("-screen", "workspace", "-tool", tool, "-testTool", t)
     time.sleep(16)
     shot(f"07_{t}")
@@ -102,5 +102,5 @@ open(os.path.join(OUT, "app.log"), "w").write(log)
 crashes = sh("bash", "-c", "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i lightcraft || true").stdout
 print("crash reports:", crashes or "none")
 for line in log.splitlines():
-    if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "export", "error", "Error")):
+    if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "export", "lensblur", "error", "Error")):
         print(line[:300])

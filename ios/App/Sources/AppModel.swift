@@ -125,6 +125,7 @@ final class AppModel: ObservableObject {
             self?.editor.pictureShown(p)
         }
         editor.onEdited = { [weak self] key in self?.library.edited(key) }
+        loupe.intercept = { [weak self] p in self?.editor.intercept(p) ?? false }
         editor.presetsChanged = { [weak self] in await self?.presetsChanged() }
         editor.onIdle = { [weak self] in
             guard let self = self, let k = self.pendingFollow else { return }
@@ -184,6 +185,14 @@ final class AppModel: ObservableObject {
             editor.addMask(t)
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             editor.localStore.userSet("local.exposure", 1.2, from: nil)
+        case "lensblur":
+            var s = editor.lensBlur
+            s.enabled = true
+            s.amount = 80
+            editor.setLensBlur(s, live: false)
+            editor.commitLensBlur()
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            NSLog("lightcraft lensblur: depth from \(editor.depthSource)")
         case "spots":
             editor.cursorTool = .spot
             editor.addSpot(CGPoint(x: 0.3, y: 0.4))
@@ -496,6 +505,7 @@ final class AppModel: ObservableObject {
                         _ = try await engine.exec("preset.xmpFromSettings", ["settings": settings, "name": s.key, "group": "LightCraft", "path": url.path])
                     } else {
                         try await engine.export(s.photo, to: url, params: recipe.params)
+                        await blurExport(s.photo, url, quality: recipe.quality)
                     }
                     if recipe.toPhotos {
                         try await AppModel.saveToPhotos(url, name: url.lastPathComponent)
@@ -521,6 +531,14 @@ final class AppModel: ObservableObject {
             NSLog("lightcraft export: \(saved) of \(list.count) saved \(recipe.ext)")
             if !recipe.toPhotos && !files.isEmpty { Share.present(files) }
         }
+    }
+
+    /// An exported photo with its lens blur (the engine's pipeline doesn't have one: the app adds it).
+    private func blurExport(_ photo: Int64, _ url: URL, quality: Int) async {
+        guard let d = try? await engine.object("develop.get", ["id": photo]) else { return }
+        let s = LensBlurState.from(d)
+        guard s.enabled, let small = try? await engine.render(photo, 1024, 1024).image, let depth = await DepthEstimator.shared.estimate(small) else { return }
+        _ = await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(toFile: url, depth: depth, s, quality: quality) }.value
     }
 
     /// A file into the Photos library (off the main actor: Photos runs the change block on its own

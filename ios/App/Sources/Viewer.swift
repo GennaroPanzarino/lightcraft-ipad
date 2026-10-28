@@ -154,7 +154,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     /// A cursor tool on the photo: one finger is the tool's, two fingers still move and zoom.
     func setTool(_ tool: CursorTool) {
         overlay.mode = tool
-        let drawing = [.spot, .paint, .shape, .sample].contains(tool)
+        let drawing = [.spot, .paint, .shape, .sample, .focus].contains(tool)
         scroll.panGestureRecognizer.minimumNumberOfTouches = drawing ? 2 : 1
         paging.isEnabled = !drawing
     }
@@ -262,6 +262,7 @@ struct ViewerHost: UIViewRepresentable {
         let ed = model.editor
         v.overlay.onSpot = { p in ed.addSpot(p) }
         v.overlay.onSample = { p in ed.sampleColor(p, add: false) }
+        v.overlay.onFocus = { u in ed.focus(at: u) }
         v.overlay.onStroke = { pts, pr in ed.stroke(pts, pressure: pr) }
         v.overlay.onShapeBegin = { ed.begin("Maschera") }
         v.overlay.onShape = { s in if let id = ed.selectedMask { ed.updateShape(id, s) } }
