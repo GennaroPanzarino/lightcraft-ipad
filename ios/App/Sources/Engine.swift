@@ -1,0 +1,165 @@
+import CoreGraphics
+import Foundation
+
+struct EngineError: LocalizedError {
+    let message: String
+    var errorDescription: String? { message }
+}
+
+/// A picture the engine made, with how long it took.
+struct Rendered {
+    let image: CGImage
+    let millis: Double
+}
+
+/// JSON numbers as the engine sends them.
+func int64(_ v: Any?) -> Int64 { (v as? NSNumber)?.int64Value ?? 0 }
+func double(_ v: Any?) -> Double { (v as? NSNumber)?.doubleValue ?? 0 }
+
+/// LightCraft's engine (one library), on a queue of its own: everything it does runs there one thing at
+/// a time, so a call waits its turn.
+final class Engine: @unchecked Sendable {
+    private let queue: DispatchQueue
+    private var handle: UnsafeMutableRawPointer?
+    private let dir: URL
+    private let nice: Int32
+    private let previews: Bool
+    /// Where the pixels come back (the largest picture asked for).
+    private let buffer: UnsafeMutablePointer<UInt8>
+    private let capacity: Int
+    let maxEdge: Int
+
+    init(dir: URL, nice: Int32 = 0, previews: Bool = false, maxEdge: Int = 4096) {
+        self.dir = dir
+        self.nice = nice
+        self.previews = previews
+        self.maxEdge = maxEdge
+        queue = DispatchQueue(label: previews ? "lightcraft-previews" : "lightcraft-engine", qos: previews ? .userInitiated : .utility)
+        capacity = maxEdge * maxEdge * 4
+        buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
+    }
+
+    deinit {
+        if let h = handle { lc_close(h) }
+        buffer.deallocate()
+    }
+
+    // ---- the queue
+
+    func run<T>(_ work: @escaping () throws -> T) async throws -> T {
+        try await withCheckedThrowingContinuation { cont in
+            queue.async { cont.resume(with: Result { try work() }) }
+        }
+    }
+
+    func open() async throws { try await run { try self.openNow() } }
+
+    private func openNow() throws {
+        guard handle == nil else { return }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        handle = dir.path.withCString { lc_open($0, nice, previews) }
+        if handle == nil { throw EngineError(message: "LightCraft non riesce ad aprire la libreria in \(dir.path)") }
+    }
+
+    /// Close the library, delete it and start an empty one (the previews' engine).
+    func reset() async throws {
+        try await run {
+            if let h = self.handle { lc_close(h) }
+            self.handle = nil
+            try? FileManager.default.removeItem(at: self.dir)
+            try self.openNow()
+        }
+    }
+
+    // ---- on the queue (for `run` and `batch`)
+
+    private func take(_ p: UnsafeMutablePointer<CChar>?) -> String {
+        guard let p = p else { return "{}" }
+        defer { lc_free(p) }
+        return String(cString: p)
+    }
+
+    private func parse(_ s: String) throws -> [String: Any] {
+        let o = (try? JSONSerialization.jsonObject(with: Data(s.utf8))) as? [String: Any] ?? [:]
+        if (o["ok"] as? Bool) == false { throw EngineError(message: o["error"] as? String ?? "errore") }
+        return o
+    }
+
+    func execNow(_ command: String, _ params: [String: Any] = [:]) throws -> Any? {
+        let data = (try? JSONSerialization.data(withJSONObject: params)) ?? Data("{}".utf8)
+        let p = String(data: data, encoding: .utf8) ?? "{}"
+        let s = command.withCString { c in p.withCString { q in take(lc_execute(handle, c, q)) } }
+        return try parse(s)["result"]
+    }
+
+    private func picture(_ json: String) throws -> Rendered {
+        let o = try parse(json)
+        let w = Int(int64(o["width"]))
+        let h = Int(int64(o["height"]))
+        guard w > 0, h > 0, w * h * 4 <= capacity else { throw EngineError(message: "immagine vuota") }
+        let data = Data(bytes: buffer, count: w * h * 4)
+        guard let provider = CGDataProvider(data: data as CFData),
+              let image = CGImage(
+                  width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent
+              )
+        else { throw EngineError(message: "immagine non valida") }
+        return Rendered(image: image, millis: double(o["ms"]))
+    }
+
+    private func clamp(_ v: Int) -> UInt32 { UInt32(max(8, min(maxEdge, v))) }
+
+    func renderNow(_ photo: Int64, _ w: Int, _ h: Int, draft: Bool) throws -> Rendered {
+        try picture(take(lc_render(handle, UInt64(photo), clamp(w), clamp(h), draft, buffer, capacity)))
+    }
+
+    // ---- what the app calls
+
+    func exec(_ command: String, _ params: [String: Any] = [:]) async throws -> Any? {
+        try await run { try self.execNow(command, params) }
+    }
+
+    func object(_ command: String, _ params: [String: Any] = [:]) async throws -> [String: Any] {
+        try await exec(command, params) as? [String: Any] ?? [:]
+    }
+
+    func array(_ command: String, _ params: [String: Any] = [:]) async throws -> [[String: Any]] {
+        try await exec(command, params) as? [[String: Any]] ?? []
+    }
+
+    /// Several things in one turn of the queue (nothing squeezes in between).
+    func batch<T>(_ work: @escaping (Engine) throws -> T) async throws -> T {
+        try await run { try work(self) }
+    }
+
+    func render(_ photo: Int64, _ w: Int, _ h: Int, draft: Bool = false) async throws -> Rendered {
+        try await run { try self.renderNow(photo, w, h, draft: draft) }
+    }
+
+    func renderBefore(_ photo: Int64, _ w: Int, _ h: Int) async throws -> Rendered {
+        try await run { try self.picture(self.take(lc_render_before(self.handle, UInt64(photo), self.clamp(w), self.clamp(h), self.buffer, self.capacity))) }
+    }
+
+    func thumb(_ photo: Int64, edge: Int) async throws -> Rendered {
+        try await run { try self.picture(self.take(lc_thumb(self.handle, UInt64(photo), UInt32(edge), self.buffer, self.capacity))) }
+    }
+
+    /// The photo with `preset` over its edits (`amount` in percent), long edge `edge` ≤ 512.
+    func variant(_ photo: Int64, preset: String, amount: Int = 100, edge: Int = 220) async throws -> Rendered {
+        try await run {
+            try self.picture(preset.withCString { p in self.take(lc_render_variant(self.handle, UInt64(photo), p, Int32(amount), UInt32(edge), self.buffer, self.capacity)) })
+        }
+    }
+
+    func exportJpeg(_ photo: Int64, to url: URL, quality: Int, longEdge: Int) async throws {
+        _ = try await run {
+            try self.parse(url.path.withCString { self.take(lc_export_jpeg(self.handle, UInt64(photo), $0, Int32(quality), UInt32(longEdge))) })
+        }
+    }
+}
+
+extension Dictionary where Key == String, Value == Any {
+    func str(_ k: String) -> String { self[k] as? String ?? "" }
+}

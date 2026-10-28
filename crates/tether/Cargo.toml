@@ -1,0 +1,21 @@
+[package]
+name = "lightcraft-tether"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LightCraft tether (L0, fork): tethered capture from Sony cameras over the camera's own Wi-Fi through Sony's Camera Remote SDK, loaded at run time. Like sysmem, an isolated crate allowed `unsafe` (the SDK's C ABI, in `sdk`)."
+
+# Opts out of the workspace lints only to keep `unsafe_code = "deny"` overridable for the `sdk`
+# module, as `lightcraft-sysmem` does. Everything outside `sdk` is safe code.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+dbg_macro = "warn"
+todo = "warn"
+
+[dependencies]
+log = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8"

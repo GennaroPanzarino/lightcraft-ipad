@@ -1,0 +1,28 @@
+*~
+plan/
+/target
+/target-*/
+/dist
+/corpus
+/log
+.DS_Store
+.claude/
+/craft-fonts
+# nix build / nix develop
+/result
+/result-*
+# model weights are never committed (SAM 3: docs/ai-masks.md)
+*.safetensors
+*.safetensors.part
+
+# iPad app build outputs
+ios/build/
+ios/build-sim/
+ios/lib/
+ios/*.xcodeproj/
+ios/App/Info.plist
+ios/App/LightCraftTether.entitlements
+Payload/
+*.ipa
+screens/
+samples/

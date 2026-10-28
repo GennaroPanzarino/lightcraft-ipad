@@ -1,0 +1,21 @@
+[package]
+name = "lightcraft-ios-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "LightCraft's engine and tether for the iPad app: a C API (engine commands, renders, export) and the camera link (SSH via russh, PTP/IP, Sony) for Swift"
+
+[lib]
+name = "lightcraft_ios"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+lightcraft-android-core = { path = "../lightcraft-android-core" }
+serde_json = { workspace = true }
+log = { workspace = true }
+russh = { version = "0.65", default-features = false, features = ["ring", "flate2"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
+tokio-util = { version = "0.7", features = ["io-util"] }
+sha2 = "0.10"
+base64 = "0.22"

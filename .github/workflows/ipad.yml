@@ -1,0 +1,100 @@
+name: iPad
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tool:
+        description: "Editor tool for the simulator screenshots"
+        default: light
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust for iOS
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ipad
+
+      - name: LightCraft core (iPad)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+        run: cargo build --release -p lightcraft-ios-core --target aarch64-apple-ios
+
+      - name: LightCraft core (simulator)
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "15.0"
+          CARGO_PROFILE_RELEASE_DEBUG: "0"
+        run: cargo build --release -p lightcraft-ios-core --target aarch64-apple-ios-sim
+
+      - name: Libraries
+        run: |
+          mkdir -p ios/lib/iphoneos ios/lib/iphonesimulator
+          cp target/aarch64-apple-ios/release/liblightcraft_ios.a ios/lib/iphoneos/
+          cp target/aarch64-apple-ios-sim/release/liblightcraft_ios.a ios/lib/iphonesimulator/
+          ls -la ios/lib/*/
+
+      - name: Xcode project
+        run: |
+          brew install xcodegen ldid
+          cd ios && xcodegen generate
+
+      - name: Build for the iPad
+        run: |
+          cd ios
+          xcodebuild -project LightCraftTether.xcodeproj -scheme LightCraftTether -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build 2>&1 | tee build-device.log | grep -E "error:|warning: unre|BUILD" || true
+          test -d build/Build/Products/Release-iphoneos/LightCraftTether.app
+
+      - name: IPA for TrollStore
+        run: |
+          APP=ios/build/Build/Products/Release-iphoneos/LightCraftTether.app
+          ldid -Sios/App/LightCraftTether.entitlements "$APP/LightCraftTether"
+          mkdir -p Payload && cp -R "$APP" Payload/
+          zip -qry LightCraftTether.ipa Payload
+          ls -la LightCraftTether.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LightCraftTether-ipa
+          path: LightCraftTether.ipa
+
+      - name: Build for the simulator
+        run: |
+          cd ios
+          xcodebuild -project LightCraftTether.xcodeproj -scheme LightCraftTether -configuration Release \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' -derivedDataPath build-sim \
+            CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES build 2>&1 | tee build-sim.log | grep -E "error:|BUILD" || true
+          test -d build-sim/Build/Products/Release-iphonesimulator/LightCraftTether.app
+
+      - name: Sample raws (raw.pixls.us, A7 IV)
+        run: |
+          mkdir -p samples
+          curl -sSL -o samples/a.ARW "https://raw.pixls.us/data/Sony/ILCE-7M4/ILCE-7M4_DSC06674_FullFrame-LossLess-Compressed-Large.ARW"
+          curl -sSL -o samples/b.ARW "https://raw.pixls.us/data/Sony/ILCE-7M4/ILCE-7M4_DSC06677_FullFrame-Raw-Compressed.ARW"
+          ls -la samples
+
+      - name: The app in the simulator with the stand-in camera
+        env:
+          TOOL: ${{ github.event.inputs.tool || 'light' }}
+        run: python3 tools/sim_test.py ios/build-sim/Build/Products/Release-iphonesimulator/LightCraftTether.app samples/a.ARW samples/b.ARW
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: screens
+          path: |
+            screens
+            ios/build-device.log
+            ios/build-sim.log
