@@ -2,8 +2,8 @@ import SwiftUI
 import UIKit
 
 /// Capture One's browser in grid view: the session's shots side by side, each with its name, rating,
-/// colour tag and flag. Tap to select, tap the selected one to open it; long press (or Seleziona) to
-/// select several; pinch to make the thumbnails bigger or smaller.
+/// colour tag and flag. A tap opens a shot (it zooms out of its thumbnail); long press or Seleziona
+/// to select several; pinch to make the thumbnails bigger or smaller.
 struct BrowserView: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var library: Library
@@ -40,7 +40,7 @@ struct BrowserView: View {
         let shots = list
         VStack(spacing: 0) {
             bar(shots)
-            ZStack {
+            ZStack(alignment: .bottom) {
                 Lc.viewer
                 if shots.isEmpty {
                     VStack(spacing: 10) {
@@ -48,21 +48,26 @@ struct BrowserView: View {
                         Text(library.shots.isEmpty ? "Nessuno scatto ancora" : "Nessuna foto con questi filtri").font(Typo.title).foregroundColor(Lc.text)
                         Text(library.shots.isEmpty ? "Le foto della sessione compaiono qui." : "Cambia i filtri in alto.").font(Typo.body).foregroundColor(Lc.text2)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
                     ScrollView {
                         LazyVGrid(columns: [GridItem(.adaptive(minimum: cell, maximum: cell * 1.5), spacing: 3)], spacing: 3) {
                             ForEach(shots) { s in
-                                BrowserCell(shot: s, selected: model.selection.contains(s.key), current: s.key == model.current)
-                                    .onTapGesture { tap(s) }
-                                    .onLongPressGesture {
-                                        Haptics.tick()
-                                        multi = true
-                                        model.toggle(s.key)
-                                    }
+                                BrowserCell(shot: s, selected: model.selection.contains(s.key), current: s.key == model.current, multi: multi)
+                                    .overlay(GeometryReader { g in
+                                        Color.clear
+                                            .contentShape(Rectangle())
+                                            .onTapGesture { tap(s, frame: g.frame(in: .global)) }
+                                            .onLongPressGesture {
+                                                Haptics.tick()
+                                                multi = true
+                                                model.toggle(s.key)
+                                            }
+                                    })
                             }
                         }
                         .padding(3)
-                        .padding(.bottom, model.selection.isEmpty ? 0 : 60)
+                        .padding(.bottom, model.selection.isEmpty || !multi ? 0 : 50)
                     }
                     .simultaneousGesture(
                         MagnificationGesture()
@@ -76,13 +81,12 @@ struct BrowserView: View {
                             }
                     )
                 }
-                if !model.selection.isEmpty {
-                    VStack {
-                        Spacer()
-                        SelectionBar(library: library, exportOpen: $exportOpen, confirmDelete: $confirmDelete)
-                    }
+                if multi && !model.selection.isEmpty {
+                    SelectionBar(library: library, exportOpen: $exportOpen, confirmDelete: $confirmDelete)
+                        .transition(.move(edge: .bottom))
                 }
             }
+            .ignoresSafeArea(edges: .bottom)
         }
         .background(Lc.window.ignoresSafeArea())
         .onAppear { cell = CGFloat(model.settings.gridSize) }
@@ -90,31 +94,37 @@ struct BrowserView: View {
             ExportSheet(keys: model.selection) { exportOpen = false }.environmentObject(model)
         }
         .alert("Eliminare \(model.selection.count == 1 ? "la foto" : "\(model.selection.count) foto")?", isPresented: $confirmDelete) {
-            Button("Elimina", role: .destructive) { model.delete(model.selection) }
+            Button("Elimina", role: .destructive) {
+                model.delete(model.selection)
+                multi = false
+            }
             Button("Annulla", role: .cancel) {}
         } message: {
             Text("Spariscono da questo iPad, con le loro regolazioni. Sulla scheda della fotocamera restano.")
         }
     }
 
-    private func tap(_ s: Shot) {
+    private func tap(_ s: Shot, frame: CGRect) {
         if multi {
             model.toggle(s.key)
             if model.selection.isEmpty { multi = false }
-        } else if model.selection == [s.key] && model.current == s.key {
-            model.go(.workspace)
-        } else {
-            model.selection = [s.key]
-            model.current = s.key
+            return
         }
+        guard s.photo != 0 || s.thumb != nil else { return }
+        model.selection = [s.key]
+        // the picture's place in the cell: where the zoom starts
+        let box = CGRect(x: frame.minX + 8, y: frame.minY + 8, width: frame.width - 16, height: frame.width * 3 / 4 - 12)
+        model.open(s.key, from: box)
     }
 
     private func bar(_ shots: [Shot]) -> some View {
         HStack(spacing: 6) {
-            ToolIcon(icon: "rectangle.on.rectangle") { model.go(.workspace) }
+            ToolIcon(icon: "slider.horizontal.below.rectangle", enabled: model.current != nil) {
+                if let k = model.current { model.open(k, from: nil) }
+            }
             VStack(alignment: .leading, spacing: 0) {
-                Text("Sessione").font(Typo.labelStrong).foregroundColor(Lc.text)
-                Text(model.selection.isEmpty ? "\(shots.count) di \(library.shots.count)" : "\(model.selection.count) selezionate").font(Typo.caption).foregroundColor(Lc.text3)
+                Text("Libreria").font(Typo.labelStrong).foregroundColor(Lc.text)
+                Text(multi ? "\(model.selection.count) selezionate" : "\(shots.count) di \(library.shots.count)").font(Typo.caption).foregroundColor(Lc.text3)
             }
             .padding(.leading, 4)
             Spacer()
@@ -138,32 +148,37 @@ struct BrowserView: View {
                 Button("Nome") { sort = "name" }
                 Button("Valutazione") { sort = "rating" }
             }
-            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 20).padding(.horizontal, 4)
-            Button {
-                multi.toggle()
-                if !multi { model.selection = model.current.map { [$0] } ?? [] }
-            } label: {
-                Text(multi ? "Fine" : "Seleziona").font(Typo.labelStrong).foregroundColor(multi ? Lc.accent : Lc.text)
-                    .padding(.horizontal, 10).frame(height: 28)
-                    .background(Lc.raised)
-                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 4)
+            barButton(multi ? "Fine" : "Seleziona", accent: multi) {
+                withAnimation(Motion.quick) {
+                    multi.toggle()
+                    if !multi { model.selection = [] }
+                }
             }
-            .buttonStyle(PressStyle())
-            Button {
-                multi = true
-                model.selection = Set(shots.filter { $0.photo != 0 }.map(\.key))
-            } label: {
-                Text("Tutte").font(Typo.labelStrong).foregroundColor(Lc.text)
-                    .padding(.horizontal, 10).frame(height: 28)
-                    .background(Lc.raised)
-                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            if multi {
+                barButton("Tutte") { model.selection = Set(shots.filter { $0.photo != 0 }.map(\.key)) }
+            }
+            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 4)
+            Button { model.openSettings = true } label: {
+                LinkStatus(tether: model.tether, raw: model.settings.raw)
             }
             .buttonStyle(PressStyle())
         }
         .padding(.horizontal, 8)
-        .frame(height: 44)
+        .frame(height: 48)
+        .padding(.top, windowControlsInset)
         .background(Lc.header)
         .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
+    }
+
+    private func barButton(_ title: String, accent: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title).font(Typo.labelStrong).foregroundColor(accent ? Lc.accent : Lc.text)
+                .padding(.horizontal, 11).frame(height: 32)
+                .background(Lc.raised)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .buttonStyle(PressStyle())
     }
 
     private func filterMenu<Items: View>(title: String, active: Bool, dot: Color? = nil, icon: String = "line.3.horizontal.decrease", @ViewBuilder items: () -> Items) -> some View {
@@ -171,11 +186,11 @@ struct BrowserView: View {
             items()
         } label: {
             HStack(spacing: 5) {
-                if let d = dot { Circle().fill(d).frame(width: 7, height: 7) } else { Image(systemName: icon).font(.system(size: 10)) }
+                if let d = dot { Circle().fill(d).frame(width: 8, height: 8) } else { Image(systemName: icon).font(.system(size: 11)) }
                 Text(title).font(Typo.label).lineLimit(1)
             }
             .foregroundColor(active ? Lc.accent : Lc.text2)
-            .padding(.horizontal, 9).frame(height: 28)
+            .padding(.horizontal, 10).frame(height: 32)
             .background(Lc.field)
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(active ? Lc.accent.opacity(0.5) : Lc.hairline, lineWidth: 0.5))
@@ -183,55 +198,70 @@ struct BrowserView: View {
     }
 }
 
-/// One shot in the grid: the picture fitted in its square (never cropped, never spilling over the
-/// next), then its name, stars, tag and flag.
+/// One shot in the grid: the picture fitted in its box (never cropped, never spilling over the next)
+/// with its stars, tag and flag over its bottom edge, the name under it.
 private struct BrowserCell: View {
     let shot: Shot
     let selected: Bool
     let current: Bool
+    let multi: Bool
 
     var body: some View {
         VStack(spacing: 0) {
             Color.clear
                 .aspectRatio(4.0 / 3.0, contentMode: .fit)
                 .overlay(
-                    ZStack {
+                    ZStack(alignment: .bottom) {
                         if let t = shot.thumb {
                             Image(decorative: t, scale: 1)
                                 .resizable()
                                 .aspectRatio(contentMode: .fit)
                                 .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
                         } else {
                             Rectangle().fill(Lc.field)
                         }
                         if shot.stage == .arriving || shot.stage == .preview {
                             ProgressRing(fraction: shot.progress, line: 2).frame(width: 26, height: 26)
+                                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        }
+                        if shot.rating > 0 || shot.label != nil || shot.flag != "none" {
+                            HStack(spacing: 4) {
+                                if let t = shot.label { Circle().fill(t.color).frame(width: 7, height: 7) }
+                                Stars(rating: shot.rating, size: 8)
+                                if shot.flag == "pick" { Image(systemName: "flag.fill").font(.system(size: 8)).foregroundColor(Lc.live) }
+                                if shot.flag == "reject" { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundColor(Lc.danger) }
+                            }
+                            .padding(.horizontal, 5)
+                            .frame(height: 15)
+                            .background(Color.black.opacity(0.6))
+                            .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+                            .padding(.bottom, 4)
                         }
                     }
-                    .padding(.horizontal, 10)
-                    .padding(.top, 10)
+                    .padding(.horizontal, 8)
+                    .padding(.top, 8)
                     .padding(.bottom, 4)
                 )
-            HStack(spacing: 4) {
-                Text(shot.name).font(Typo.caption).foregroundColor(selected ? Lc.text : Lc.text2).lineLimit(1).truncationMode(.middle)
-                Spacer(minLength: 2)
-                if shot.flag == "pick" { Image(systemName: "flag.fill").font(.system(size: 8)).foregroundColor(Lc.live) }
-                if shot.flag == "reject" { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundColor(Lc.danger) }
-                if let t = shot.label { Circle().fill(t.color).frame(width: 7, height: 7) }
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 16)
-            HStack {
-                Stars(rating: shot.rating, size: 8)
-                Spacer()
-            }
-            .padding(.horizontal, 8)
-            .frame(height: 14)
-            .padding(.bottom, 4)
+            Text(shot.name)
+                .font(Typo.caption)
+                .foregroundColor(selected ? Lc.text : Lc.text2)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, 6)
+                .padding(.bottom, 5)
         }
         .background(selected ? Lc.pressed : Lc.panel)
-        .overlay(Rectangle().stroke(selected ? Lc.select : (current ? Lc.hairline2 : Color.clear), lineWidth: selected ? 1.5 : 1))
-        .contentShape(Rectangle())
+        .overlay(alignment: .topTrailing) {
+            if multi {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17))
+                    .foregroundColor(selected ? Lc.accent : Color.white.opacity(0.7))
+                    .padding(8)
+            }
+        }
+        .overlay(Rectangle().stroke(selected ? Lc.select : (current ? Lc.hairline2 : Color.clear), lineWidth: selected ? 1 : 0.5))
     }
 }
 
@@ -248,12 +278,12 @@ private struct SelectionBar: View {
         let tag: ColorTag? = Set(sel.map { $0.label?.rawValue ?? "" }).count == 1 ? sel.first?.label : nil
         HStack(spacing: 10) {
             StarRating(rating: rating, size: 12, spacing: -2) { model.rate(model.selection, $0) }
-            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22)
+            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 20)
             TagPicker(tag: tag, size: 12) { model.tag(model.selection, $0) }
-            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22)
-            ToolIcon(icon: "flag", size: 30) { model.flag(model.selection, "pick") }
-            ToolIcon(icon: "xmark", size: 30) { model.flag(model.selection, "reject") }
-            ToolIcon(icon: "flag.slash", size: 30) { model.flag(model.selection, "none") }
+            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 20)
+            ToolIcon(icon: "flag", size: 32) { model.flag(model.selection, "pick") }
+            ToolIcon(icon: "xmark", size: 32) { model.flag(model.selection, "reject") }
+            ToolIcon(icon: "flag.slash", size: 32) { model.flag(model.selection, "none") }
             Spacer(minLength: 4)
             Menu {
                 ForEach(presetGroups(model.presets), id: \.self) { g in
@@ -285,25 +315,37 @@ private struct SelectionBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
             .buttonStyle(PressStyle())
-            ToolIcon(icon: "trash", size: 30) { confirmDelete = true }
+            ToolIcon(icon: "trash", size: 32) { confirmDelete = true }
         }
         .padding(.horizontal, 12)
-        .frame(height: 50)
-        .background(Lc.header.opacity(0.97))
+        .frame(height: 44)
+        .background(Lc.header.opacity(0.98))
         .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .top)
     }
 }
 
-/// Capture One's process recipe: JPEG at a quality and size, into Photos or to Files / AirDrop.
+/// Capture One's process recipe: JPEG or TIFF at a size, into Photos or to Files / AirDrop; or the
+/// photo's look as a Lightroom preset.
 struct ExportSheet: View {
     @EnvironmentObject var model: AppModel
     let keys: Set<String>
     let onClose: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var format = 0
     @State private var edge = 0
     @State private var quality = 92.0
     @State private var toPhotos = true
     private let edges = [0, 4096, 2048, 1080]
+    private let formats = ["JPEG", "TIFF 8 bit", "TIFF 16 bit", "Preset Lightroom"]
+
+    private var recipe: ExportRecipe {
+        switch format {
+        case 1: return ExportRecipe(format: .tiff8, quality: Int(quality), edge: edge, toPhotos: toPhotos)
+        case 2: return ExportRecipe(format: .tiff16, quality: Int(quality), edge: edge, toPhotos: toPhotos)
+        case 3: return ExportRecipe(format: .lightroom, quality: Int(quality), edge: edge, toPhotos: false)
+        default: return ExportRecipe(format: .jpeg, quality: Int(quality), edge: edge, toPhotos: toPhotos)
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -314,21 +356,21 @@ struct ExportSheet: View {
                 Spacer()
                 Text(keys.count == 1 ? "Esporta 1 foto" : "Esporta \(keys.count) foto").font(Typo.title).foregroundColor(Lc.text)
                 Spacer()
-                Button("Esporta") { model.exportShots(keys, quality: Int(quality), edge: edge, toPhotos: toPhotos) }
+                Button("Esporta") { model.exportShots(keys, recipe: recipe) }
                     .font(Typo.body.weight(.semibold))
                     .foregroundColor(model.export == nil ? Lc.accent : Lc.text3)
                     .disabled(model.export != nil)
             }
             .padding(.horizontal, 18)
-            .frame(height: 50)
+            .frame(height: 52)
             .background(Lc.header)
             VStack(alignment: .leading, spacing: 14) {
                 if let e = model.export {
                     if e.finished {
                         VStack(spacing: 10) {
                             Image(systemName: e.saved > 0 ? "checkmark.circle" : "xmark.octagon").font(.system(size: 40, weight: .light)).foregroundColor(e.saved > 0 ? Lc.live : Lc.danger)
-                            Text(e.saved == 1 ? "1 foto esportata" : "\(e.saved) foto esportate").font(Typo.title).foregroundColor(Lc.text)
-                            Text(toPhotos ? "Le trovi nell'app Foto." : "Scegli dove salvarle nel pannello di condivisione.").font(Typo.body).foregroundColor(Lc.text2)
+                            Text(e.saved == 1 ? "1 file esportato" : "\(e.saved) file esportati").font(Typo.title).foregroundColor(Lc.text)
+                            Text(e.message).font(Typo.body).foregroundColor(Lc.text2).multilineTextAlignment(.center)
                         }
                         .frame(maxWidth: .infinity)
                         .padding(.top, 20)
@@ -338,21 +380,27 @@ struct ExportSheet: View {
                     }
                 } else {
                     Text("FORMATO").overline()
-                    HStack {
-                        Text("JPEG").font(Typo.label).foregroundColor(Lc.text)
-                        Spacer()
-                        Text("sRGB · 8 bit").font(Typo.caption).foregroundColor(Lc.text3)
+                    Segment(options: formats, selected: format) { format = $0 }
+                    if format == 3 {
+                        Text("Le regolazioni di ogni foto come preset Lightroom (.xmp): in Lightroom, Importa profili e preset. Ritaglio e ritocchi restano fuori.")
+                            .font(Typo.caption).foregroundColor(Lc.text3).fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        if format == 0 {
+                            ValueSlider(
+                                control: Control(id: "export.quality", label: "Qualità", min: 60, max: 100, def: 92, step: 1, decimals: 0, track: .plain),
+                                value: quality,
+                                onChange: { quality = $0 }
+                            )
+                            .frame(height: ToolSlider.height)
+                        } else {
+                            Text(format == 1 ? "sRGB, 8 bit per canale, compressione LZW." : "Adobe RGB, 16 bit per canale, compressione ZIP: per ritoccare altrove.")
+                                .font(Typo.caption).foregroundColor(Lc.text3)
+                        }
+                        Text("DIMENSIONE").overline().padding(.top, 4)
+                        Segment(options: ["Originale", "4096 px", "2048 px", "1080 px"], selected: edges.firstIndex(of: edge) ?? 0) { edge = edges[$0] }
+                        Text("DESTINAZIONE").overline().padding(.top, 4)
+                        Segment(options: ["App Foto", "File, AirDrop…"], selected: toPhotos ? 0 : 1) { toPhotos = $0 == 0 }
                     }
-                    ValueSlider(
-                        control: Control(id: "export.quality", label: "Qualità", min: 60, max: 100, def: 92, step: 1, decimals: 0, track: .plain),
-                        value: quality,
-                        onChange: { quality = $0 }
-                    )
-                    .frame(height: ToolSlider.height)
-                    Text("DIMENSIONE").overline().padding(.top, 4)
-                    Segment(options: ["Originale", "4096 px", "2048 px", "1080 px"], selected: edges.firstIndex(of: edge) ?? 0) { edge = edges[$0] }
-                    Text("DESTINAZIONE").overline().padding(.top, 4)
-                    Segment(options: ["App Foto", "File, AirDrop…"], selected: toPhotos ? 0 : 1) { toPhotos = $0 == 0 }
                 }
                 Spacer()
             }

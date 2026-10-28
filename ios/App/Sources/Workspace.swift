@@ -3,7 +3,8 @@ import UIKit
 
 /// Capture One's main window on the iPad: the toolbar, the tools in a column at the side, the photo,
 /// the shots in a strip under it. Tethering happens here: each new shot lands in the strip and on
-/// screen, ready to be developed in the column.
+/// screen, ready to be developed in the column. A tap on the photo hides the toolbar and the column
+/// together (and brings them back).
 struct Workspace: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ed: EditorModel
@@ -14,22 +15,27 @@ struct Workspace: View {
     var body: some View {
         GeometryReader { geo in
             let landscape = geo.size.width > geo.size.height
-            let panelW: CGFloat = landscape ? 330 : 300
+            let panelW: CGFloat = landscape ? 350 : 320
+            let tools = model.toolsShown && model.chrome
             VStack(spacing: 0) {
-                WorkspaceBar(ed: ed, before: $before, settings: $settingsOpen, export: $exportOpen)
+                if model.chrome {
+                    WorkspaceBar(ed: ed, before: $before, settings: $settingsOpen, export: $exportOpen)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
                 HStack(spacing: 0) {
-                    if model.toolsShown && model.settings.toolsLeft {
+                    if tools && model.settings.toolsLeft {
                         ToolPanel(ed: ed).frame(width: panelW)
+                            .transition(.move(edge: .leading))
                         Rectangle().fill(Lc.line).frame(width: 1)
                     }
                     VStack(spacing: 0) {
                         ViewerArea(library: model.library, ed: ed, before: before)
-                        Rectangle().fill(Lc.line).frame(height: 1)
                         Filmstrip(library: model.library, current: model.current)
                     }
-                    if model.toolsShown && !model.settings.toolsLeft {
+                    if tools && !model.settings.toolsLeft {
                         Rectangle().fill(Lc.line).frame(width: 1)
                         ToolPanel(ed: ed).frame(width: panelW)
+                            .transition(.move(edge: .trailing))
                     }
                 }
             }
@@ -42,8 +48,11 @@ struct Workspace: View {
     }
 }
 
-/// The toolbar: browser and tools on the left, the photo's name and rating in the middle, the
-/// commands and the camera on the right.
+/// Room above the toolbars for iPadOS's own window controls (the three dots at the top).
+let windowControlsInset: CGFloat = 12
+
+/// The toolbar: the library and the tools on the left, the photo's name and rating in the middle,
+/// the commands and the camera on the right.
 private struct WorkspaceBar: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ed: EditorModel
@@ -52,36 +61,38 @@ private struct WorkspaceBar: View {
     @Binding var export: Bool
 
     var body: some View {
-        HStack(spacing: 2) {
-            ToolIcon(icon: "square.grid.2x2") { model.go(.browser) }
-            ToolIcon(icon: model.settings.toolsLeft ? "sidebar.left" : "sidebar.right", active: !model.toolsShown) {
-                withAnimation(Motion.panel) { model.toolsShown.toggle() }
+        ZStack {
+            HStack(spacing: 2) {
+                ToolIcon(icon: "house") { model.go(.browser) }
+                ToolIcon(icon: model.settings.toolsLeft ? "sidebar.left" : "sidebar.right", active: !model.toolsShown) {
+                    withAnimation(Motion.panel) { model.toolsShown.toggle() }
+                }
+                Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
+                ToolIcon(icon: "eyedropper", active: ed.picking, enabled: ed.photo != 0) { ed.picking.toggle() }
+                BeforeButton(ed: ed, before: $before)
+                Spacer(minLength: 8)
+                ToolIcon(icon: "arrow.uturn.backward", enabled: ed.canUndo) { ed.undo() }
+                ToolIcon(icon: "arrow.uturn.forward", enabled: ed.canRedo) { ed.redo() }
+                Menu {
+                    Button(role: .destructive) { ed.reset() } label: { Label("Azzera tutte le regolazioni", systemImage: "arrow.counterclockwise") }
+                } label: {
+                    Image(systemName: "arrow.counterclockwise").font(.system(size: 17)).foregroundColor(ed.photo != 0 ? Lc.text : Lc.text3)
+                        .frame(width: 38, height: 38)
+                }
+                .disabled(ed.photo == 0)
+                ToolIcon(icon: "square.and.arrow.up", enabled: ed.photo != 0) { export = true }
+                Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
+                Button { settings = true } label: {
+                    LinkStatus(tether: model.tether, raw: model.settings.raw)
+                }
+                .buttonStyle(PressStyle())
             }
-            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 20).padding(.horizontal, 6)
-            ToolIcon(icon: "eyedropper", active: ed.picking, enabled: ed.photo != 0) { ed.picking.toggle() }
-            BeforeButton(ed: ed, before: $before)
-            Spacer(minLength: 8)
             CurrentTitle(library: model.library, key: model.current)
-            Spacer(minLength: 8)
-            ToolIcon(icon: "arrow.uturn.backward", enabled: ed.canUndo) { ed.undo() }
-            ToolIcon(icon: "arrow.uturn.forward", enabled: ed.canRedo) { ed.redo() }
-            Menu {
-                Button(role: .destructive) { ed.reset() } label: { Label("Azzera tutte le regolazioni", systemImage: "arrow.counterclockwise") }
-            } label: {
-                Image(systemName: "arrow.counterclockwise").font(.system(size: 15)).foregroundColor(ed.photo != 0 ? Lc.text : Lc.text3)
-                    .frame(width: 34, height: 34)
-            }
-            .disabled(ed.photo == 0)
-            ToolIcon(icon: "square.and.arrow.up", enabled: ed.photo != 0) { export = true }
-            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 20).padding(.horizontal, 6)
-            Button { model.go(.workspace); settings = true } label: {
-                LinkStatus(tether: model.tether, raw: model.settings.raw)
-            }
-            .buttonStyle(PressStyle())
-            ToolIcon(icon: "gearshape") { settings = true }
+                .frame(maxWidth: 360)
         }
         .padding(.horizontal, 8)
-        .frame(height: 44)
+        .frame(height: 48)
+        .padding(.top, windowControlsInset)
         .background(Lc.header)
         .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
     }
@@ -95,9 +106,9 @@ private struct BeforeButton: View {
 
     var body: some View {
         Image(systemName: "rectangle.lefthalf.inset.filled")
-            .font(.system(size: 15))
+            .font(.system(size: 17))
             .foregroundColor(holding ? Lc.accent : (ed.photo != 0 ? Lc.text : Lc.text3))
-            .frame(width: 34, height: 34)
+            .frame(width: 38, height: 38)
             .background(holding ? Lc.pressed : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .contentShape(Rectangle())
@@ -119,7 +130,7 @@ private struct BeforeButton: View {
     }
 }
 
-/// The photo's name, its rating and colour tag (tap the stars to rate).
+/// The photo's name and its rating (tap the stars to rate), in the middle of the toolbar.
 private struct CurrentTitle: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var library: Library
@@ -128,10 +139,10 @@ private struct CurrentTitle: View {
     var body: some View {
         let shot = key.flatMap { library.shot($0) }
         HStack(spacing: 10) {
-            if let t = shot?.label { Circle().fill(t.color).frame(width: 8, height: 8) }
+            if let t = shot?.label { Circle().fill(t.color).frame(width: 9, height: 9) }
             Text(shot?.name ?? "LightCraft").font(Typo.labelStrong).foregroundColor(Lc.text).lineLimit(1)
             if let s = shot, s.photo != 0 {
-                StarRating(rating: s.rating, size: 10, spacing: -4) { model.rate([s.key], $0) }
+                StarRating(rating: s.rating, size: 11, spacing: -4) { model.rate([s.key], $0) }
             }
         }
     }
@@ -167,23 +178,23 @@ private struct ViewerArea: View {
                     if ed.picking {
                         Text("Tocca un punto neutro per il bilanciamento del bianco")
                             .font(Typo.labelStrong).foregroundColor(Lc.text)
-                            .padding(.horizontal, 12).frame(height: 28)
+                            .padding(.horizontal, 12).frame(height: 30)
                             .background(Lc.raised.opacity(0.95))
                             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
-                            .padding(.top, 12)
+                            .padding(.top, model.chrome ? 12 : 12 + windowControlsInset)
                     }
                     Spacer()
                     if before != nil {
                         Text("PRIMA").font(Typo.group).tracking(1).foregroundColor(Lc.text)
-                            .padding(.horizontal, 10).frame(height: 22)
+                            .padding(.horizontal, 10).frame(height: 24)
                             .background(Color.black.opacity(0.6))
                             .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
                             .padding(.bottom, 12)
                     }
                 }
             }
-            .onAppear { measure(geo.size) }
-            .onChange(of: geo.size) { measure($0) }
+            .onAppear { measure(geo) }
+            .onChange(of: geo.size) { _ in measure(geo) }
         }
         .onAppear { want() }
         .onChange(of: model.current) { _ in want() }
@@ -191,14 +202,15 @@ private struct ViewerArea: View {
         .onChange(of: zoomed) { _ in want() }
     }
 
-    private func measure(_ size: CGSize) {
+    private func measure(_ geo: GeometryProxy) {
         let s = UIScreen.main.scale
-        px = (w: Int(size.width * s), h: Int(size.height * s))
+        px = (w: Int(geo.size.width * s), h: Int(geo.size.height * s))
         ed.viewport = (w: min(4096, px.w), h: min(4096, px.h))
+        model.viewerFrame = geo.frame(in: .global)
         want()
     }
 
-    /// The shot on screen at the viewer's size (sharper when zoomed into), then its neighbours.
+    /// The shot on screen at the viewer's size (full size when zoomed into), then its neighbours.
     private func want() {
         let w = min(2560, px.w), h = min(2560, px.h)
         library.screen = (w: w, h: h)
@@ -207,7 +219,7 @@ private struct ViewerArea: View {
         let order = [i, i + 1, i - 1].filter { $0 >= 0 && $0 < shots.count }.map { shots[$0] }
         model.loupe.show(order.filter { $0.photo != 0 }.map { s in
             let big = s.key == model.current && zoomed
-            return Loupe.Want(key: s.key, photo: s.photo, revision: s.revision, w: big ? 4096 : w, h: big ? 4096 : h)
+            return Loupe.Want(key: s.key, photo: s.photo, revision: s.revision, w: big ? 8192 : w, h: big ? 8192 : h)
         })
     }
 }
@@ -225,7 +237,7 @@ private struct EmptyViewer: View {
             case .connecting: return ("Collegamento…", "Accesso alla fotocamera in corso.")
             case .retrying: return ("Ricollegamento…", "Il segnale si è interrotto: riprovo da solo.")
             case .blocked(let m): return ("Serve un controllo", m)
-            case .off: return ("Non collegata", "Apri le impostazioni per collegare la fotocamera.")
+            case .off: return ("Non collegata", "Tocca lo stato della fotocamera in alto per collegarla.")
             }
         }()
         return VStack(spacing: 14) {
@@ -237,12 +249,21 @@ private struct EmptyViewer: View {
     }
 }
 
-/// The session's shots under the photo, thumbnail against thumbnail: tap to show, hold for the
-/// browser with that shot selected.
+private struct StripFrames: PreferenceKey {
+    static var defaultValue: [String: CGRect] = [:]
+    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+/// The session's shots under the photo, thumbnail against thumbnail: tap to show one; hold a
+/// thumbnail and slide the finger along the strip to run through the shots.
 struct Filmstrip: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var library: Library
     let current: String?
+    @State private var frames: [String: CGRect] = [:]
+    @State private var scrubbing = false
 
     var body: some View {
         let shots = library.shots.filter { $0.stage != .failed }
@@ -252,19 +273,38 @@ struct Filmstrip: View {
                     ForEach(shots) { s in
                         StripCell(shot: s, on: s.key == current)
                             .id(s.key)
+                            .background(GeometryReader { g in
+                                Color.clear.preference(key: StripFrames.self, value: [s.key: g.frame(in: .named("strip"))])
+                            })
                             .onTapGesture { model.current = s.key }
-                            .onLongPressGesture {
-                                model.selection = [s.key]
-                                model.go(.browser)
-                            }
                     }
                 }
                 .padding(.horizontal, 2)
+                .coordinateSpace(name: "strip")
+                .onPreferenceChange(StripFrames.self) { f in if !scrubbing { frames = f } }
+                .gesture(
+                    LongPressGesture(minimumDuration: 0.22)
+                        .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("strip")))
+                        .onChanged { v in
+                            guard case .second(true, let drag?) = v else { return }
+                            if !scrubbing {
+                                scrubbing = true
+                                Haptics.confirm()
+                            }
+                            let x = drag.location.x
+                            if let hit = frames.first(where: { $0.value.minX <= x && x < $0.value.maxX })?.key, hit != model.current {
+                                Haptics.tick()
+                                model.current = hit
+                            }
+                        }
+                        .onEnded { _ in scrubbing = false }
+                )
             }
-            .frame(height: 84)
+            .frame(height: 70)
             .background(Lc.window)
+            .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .top)
             .onChange(of: current) { k in
-                if let k = k { withAnimation(Motion.quick) { proxy.scrollTo(k, anchor: .center) } }
+                if let k = k, !scrubbing { withAnimation(Motion.quick) { proxy.scrollTo(k, anchor: .center) } }
             }
             .onAppear { if let k = current { proxy.scrollTo(k, anchor: .center) } }
         }
@@ -277,30 +317,32 @@ private struct StripCell: View {
 
     var body: some View {
         let w = max(44, min(108, 62 * CGFloat(shot.aspect)))
-        VStack(spacing: 2) {
-            ZStack {
-                Rectangle().fill(Lc.field)
-                if let t = shot.thumb {
-                    Image(decorative: t, scale: 1).resizable().aspectRatio(contentMode: .fit)
-                }
-                if shot.stage == .arriving || shot.stage == .preview {
-                    Color.black.opacity(0.35)
-                    ProgressRing(fraction: shot.progress, line: 1.5).frame(width: 18, height: 18)
-                }
+        ZStack(alignment: .bottom) {
+            Rectangle().fill(Lc.field)
+            if let t = shot.thumb {
+                Image(decorative: t, scale: 1).resizable().aspectRatio(contentMode: .fit)
             }
-            .frame(width: w, height: 62)
-            .overlay(Rectangle().stroke(on ? Lc.select : Color.clear, lineWidth: 2))
-            HStack(spacing: 3) {
-                if let t = shot.label { Circle().fill(t.color).frame(width: 5, height: 5) }
-                Stars(rating: shot.rating, size: 6)
-                if shot.flag == "pick" { Image(systemName: "flag.fill").font(.system(size: 6)).foregroundColor(Lc.live) }
-                if shot.flag == "reject" { Image(systemName: "xmark").font(.system(size: 6, weight: .bold)).foregroundColor(Lc.danger) }
+            if shot.stage == .arriving || shot.stage == .preview {
+                Color.black.opacity(0.35)
+                ProgressRing(fraction: shot.progress, line: 1.5).frame(width: 18, height: 18).padding(.bottom, 22)
             }
-            .frame(height: 10)
+            if shot.rating > 0 || shot.label != nil || shot.flag != "none" {
+                HStack(spacing: 3) {
+                    if let t = shot.label { Circle().fill(t.color).frame(width: 6, height: 6) }
+                    Stars(rating: shot.rating, size: 7)
+                    if shot.flag == "pick" { Image(systemName: "flag.fill").font(.system(size: 7)).foregroundColor(Lc.live) }
+                    if shot.flag == "reject" { Image(systemName: "xmark").font(.system(size: 7, weight: .bold)).foregroundColor(Lc.danger) }
+                }
+                .padding(.horizontal, 4)
+                .frame(height: 12)
+                .background(Color.black.opacity(0.55))
+                .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
+                .padding(.bottom, 3)
+            }
         }
+        .frame(width: w, height: 62)
+        .overlay(Rectangle().stroke(on ? Lc.select : Color.clear, lineWidth: 2))
         .padding(.vertical, 4)
-        .padding(.horizontal, 2)
-        .background(on ? Lc.pressed : Color.clear)
         .contentShape(Rectangle())
     }
 }

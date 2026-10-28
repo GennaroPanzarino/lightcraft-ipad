@@ -44,6 +44,10 @@ struct RootView: View {
                 Workspace(ed: model.editor)
                     .transition(.opacity)
             }
+            if let h = model.hero {
+                HeroZoom(hero: h) { if model.hero?.id == h.id { model.hero = nil } }
+                    .id(h.id)
+            }
             if let n = model.note {
                 VStack {
                     Spacer()
@@ -55,6 +59,7 @@ struct RootView: View {
         .animation(Motion.quick, value: model.screen)
         .animation(Motion.quick, value: model.ready)
         .modifier(KeepAwake(tether: model.tether, on: model.settings.keepAwake))
+        .sheet(isPresented: $model.openSettings) { SettingsSheet().environmentObject(model) }
         .onAppear(perform: testLandscape)
     }
 
@@ -68,6 +73,44 @@ struct RootView: View {
                 scene?.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { e in NSLog("lightcraft rotate: \(e)") }
             }
         }
+    }
+}
+
+/// A thumbnail opening into the viewer: the picture grows from its place in the grid to its place on
+/// screen (Lightroom's zoom), then the viewer under it takes over.
+private struct HeroZoom: View {
+    @EnvironmentObject var model: AppModel
+    let hero: Hero
+    let done: () -> Void
+    @State private var target: CGRect?
+
+    var body: some View {
+        GeometryReader { geo in
+            let origin = geo.frame(in: .global).origin
+            let size = CGSize(width: hero.image.width, height: hero.image.height)
+            let r = fitted(size, in: target ?? hero.from).offsetBy(dx: -origin.x, dy: -origin.y)
+            Image(decorative: hero.image, scale: 1)
+                .resizable()
+                .frame(width: r.width, height: r.height)
+                .position(x: r.midX, y: r.midY)
+                .shadow(color: .black.opacity(target == nil ? 0 : 0.5), radius: 20)
+        }
+        .ignoresSafeArea()
+        .allowsHitTesting(false)
+        .onAppear {
+            // the viewer has been measured by the next turn of the run loop
+            DispatchQueue.main.async {
+                let t = model.viewerFrame == .zero ? UIScreen.main.bounds : model.viewerFrame
+                withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) { target = t }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { done() }
+            }
+        }
+    }
+
+    private func fitted(_ s: CGSize, in r: CGRect) -> CGRect {
+        let a = s.width / max(1, s.height)
+        let size = r.width / max(1, r.height) > a ? CGSize(width: r.height * a, height: r.height) : CGSize(width: r.width, height: r.width / a)
+        return CGRect(x: r.midX - size.width / 2, y: r.midY - size.height / 2, width: size.width, height: size.height)
     }
 }
 

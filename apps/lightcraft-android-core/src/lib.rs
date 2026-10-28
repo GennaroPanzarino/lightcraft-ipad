@@ -144,6 +144,24 @@ impl Core {
         Ok(json!({"width": img.width, "height": img.height, "ms": t0.elapsed().as_secs_f64() * 1000.0, "gpuFallback": r.gpu_fallback}))
     }
 
+    /// The photo as a file at `path`, the export options as the engine takes them (`format`: jpg |
+    /// tiff | png…, `quality`, `bitDepth`, `longEdge`, `colorSpace`, `tiffCompression`…).
+    pub fn export(&mut self, id: u64, path: &str, params: &Value) -> Result<Value, String> {
+        use lightcraft_engine::export::{ExportOptions, export_photo, write_file};
+        let t0 = Instant::now();
+        let mut p = params.clone();
+        if let Some(o) = p.as_object_mut() {
+            // where the file goes is `path`'s business, not the options'
+            for k in ["path", "dir", "addToPhotos", "id", "ids"] {
+                o.remove(k);
+            }
+        }
+        let o = ExportOptions::from_params(&p).map_err(|e| e.to_string())?;
+        let e = export_photo(&mut self.session, PhotoId(id), &o, 1)?;
+        write_file(path, &e.bytes)?;
+        Ok(json!({"path": path, "width": e.width, "height": e.height, "bytes": e.bytes.len(), "ms": t0.elapsed().as_secs_f64() * 1000.0}))
+    }
+
     /// The photo as a JPEG at `path` (its long edge `long_edge` pixels, or full size).
     pub fn export_jpeg(&mut self, id: u64, path: &str, quality: u8, long_edge: Option<u64>) -> Result<Value, String> {
         use lightcraft_engine::export::{ExportOptions, export_photo, write_file};

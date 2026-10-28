@@ -23,7 +23,8 @@ struct ConnectView: View {
                 Spacer()
             }
             .padding(.horizontal, 8)
-            .frame(height: 44)
+            .frame(height: 48)
+            .padding(.top, windowControlsInset)
             .background(Lc.header)
             .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
             GeometryReader { geo in

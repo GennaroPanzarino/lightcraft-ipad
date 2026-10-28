@@ -14,13 +14,13 @@ struct ToolIcon: View {
     let icon: String
     var active = false
     var enabled = true
-    var size: CGFloat = 34
+    var size: CGFloat = 38
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 15, weight: .regular))
+                .font(.system(size: 17, weight: .regular))
                 .foregroundColor(active ? Lc.accent : (enabled ? Lc.text : Lc.text3.opacity(0.6)))
                 .frame(width: size, height: size)
                 .background(active ? Lc.pressed : Color.clear)
@@ -43,12 +43,12 @@ struct FlatButton: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 6) {
-                if let icon = icon { Image(systemName: icon).font(.system(size: 12, weight: .medium)) }
+                if let icon = icon { Image(systemName: icon).font(.system(size: 13, weight: .medium)) }
                 Text(title).font(Typo.labelStrong).lineLimit(1)
             }
             .foregroundColor(prominent ? Color.black : Lc.text)
             .padding(.horizontal, 12)
-            .frame(maxWidth: .infinity, minHeight: 30)
+            .frame(maxWidth: .infinity, minHeight: 34)
             .background(prominent ? Lc.select : Lc.raised)
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Lc.hairline, lineWidth: 0.5))
@@ -73,7 +73,7 @@ struct Segment: View {
                         .lineLimit(1)
                         .minimumScaleFactor(0.8)
                         .foregroundColor(i == selected ? Lc.text : Lc.text2)
-                        .frame(maxWidth: .infinity, minHeight: 26)
+                        .frame(maxWidth: .infinity, minHeight: 30)
                         .background(i == selected ? Lc.pressed : Lc.field)
                 }
                 .buttonStyle(.plain)
@@ -98,9 +98,9 @@ struct ToggleRow: View {
             Toggle("", isOn: Binding(get: { on }, set: { onChange($0) }))
                 .labelsHidden()
                 .toggleStyle(SwitchToggleStyle(tint: Lc.accent))
-                .scaleEffect(0.75, anchor: .trailing)
+                .scaleEffect(0.8, anchor: .trailing)
         }
-        .frame(height: 30)
+        .frame(height: 34)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)
     }
@@ -114,7 +114,7 @@ struct MenuField<Items: View>: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(label).font(Typo.label).foregroundColor(Lc.text2).frame(width: 92, alignment: .leading)
+            Text(label).font(Typo.label).foregroundColor(Lc.text2).frame(width: 100, alignment: .leading)
             Menu {
                 items
             } label: {
@@ -123,14 +123,14 @@ struct MenuField<Items: View>: View {
                     Spacer(minLength: 4)
                     Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundColor(Lc.text3)
                 }
-                .padding(.horizontal, 8)
-                .frame(height: 24)
+                .padding(.horizontal, 9)
+                .frame(height: 28)
                 .background(Lc.field)
                 .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous).stroke(Lc.hairline, lineWidth: 0.5))
             }
         }
-        .frame(height: 30)
+        .frame(height: 34)
     }
 }
 

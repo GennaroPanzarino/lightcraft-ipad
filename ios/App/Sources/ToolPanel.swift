@@ -68,7 +68,7 @@ struct ToolPanel: View {
         VStack(spacing: 0) {
             GroupStrip(state: state) { target = $0 }
             HistogramBox(ed: ed)
-                .frame(height: 64)
+                .frame(height: 70)
                 .padding(.horizontal, 10)
                 .padding(.top, 8)
             Text(ed.exposureLine.isEmpty ? " " : ed.exposureLine)
@@ -283,9 +283,9 @@ private struct GroupStrip: View {
                 Button { onPick(g) } label: {
                     VStack(spacing: 0) {
                         Image(systemName: g.icon)
-                            .font(.system(size: 15))
+                            .font(.system(size: 17))
                             .foregroundColor(g == state.active ? Lc.text : Lc.text3)
-                            .frame(maxWidth: .infinity, minHeight: 36)
+                            .frame(maxWidth: .infinity, minHeight: 40)
                         Rectangle().fill(g == state.active ? Lc.accent : Color.clear).frame(height: 2)
                     }
                     .contentShape(Rectangle())
@@ -293,7 +293,7 @@ private struct GroupStrip: View {
                 .buttonStyle(.plain)
             }
         }
-        .frame(height: 38)
+        .frame(height: 42)
         .background(Lc.header)
         .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
     }
@@ -310,7 +310,7 @@ private struct GroupHeader: View {
             Spacer()
         }
         .padding(.horizontal, 12)
-        .frame(height: 26)
+        .frame(height: 30)
         .background(Lc.window)
         .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
         .background(GeometryReader { g in
@@ -327,8 +327,8 @@ struct MiniButton: View {
     var body: some View {
         Button(action: action) {
             Text(title).font(Typo.caption).foregroundColor(Lc.text)
-                .padding(.horizontal, 8)
-                .frame(height: 20)
+                .padding(.horizontal, 9)
+                .frame(height: 24)
                 .background(Lc.raised)
                 .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
         }
@@ -373,7 +373,7 @@ struct ToolBox<Content: View>: View {
             }
             .padding(.leading, 12)
             .padding(.trailing, 8)
-            .frame(height: 32)
+            .frame(height: 36)
             .background(Lc.header)
             if !folded {
                 VStack(alignment: .leading, spacing: 0) { content }
@@ -397,9 +397,9 @@ private struct ToolHeaderControls: View {
                 let off = ed.disabled.contains(s)
                 Button { ed.setSection(s, enabled: off) } label: {
                     Image(systemName: off ? "eye.slash" : "eye")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundColor(off ? Lc.accent : Lc.text3)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 32, height: 32)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -409,9 +409,9 @@ private struct ToolHeaderControls: View {
                     if let s = section { ed.resetSection(s) } else if let ids = resetIds { ed.resetControls(ids) }
                 } label: {
                     Image(systemName: "arrow.counterclockwise")
-                        .font(.system(size: 11))
+                        .font(.system(size: 13))
                         .foregroundColor(Lc.text3)
-                        .frame(width: 28, height: 28)
+                        .frame(width: 32, height: 32)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

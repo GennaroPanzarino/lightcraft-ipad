@@ -25,8 +25,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: LightCraft
-        CFBundleShortVersionString: "2.0"
-        CFBundleVersion: "2"
+        CFBundleShortVersionString: "2.1"
+        CFBundleVersion: "3"
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UIRequiresFullScreen: false
@@ -48,6 +48,8 @@ targets:
       properties:
         com.apple.developer.networking.HotspotConfiguration: true
         com.apple.developer.networking.wifi-info: true
+        com.apple.developer.kernel.increased-memory-limit: true
+        com.apple.developer.kernel.extended-virtual-addressing: true
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lightcraft.tether

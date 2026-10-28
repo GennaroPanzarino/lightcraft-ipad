@@ -45,9 +45,9 @@ final class ToolSlider: UIView, UIGestureRecognizerDelegate, UITextFieldDelegate
     private var lastX: CGFloat = 0
     private let ticker = UISelectionFeedbackGenerator()
 
-    static let height: CGFloat = 30
-    private let labelWidth: CGFloat = 92
-    private let fieldWidth: CGFloat = 48
+    static let height: CGFloat = 34
+    private let labelWidth: CGFloat = 100
+    private let fieldWidth: CGFloat = 54
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -135,7 +135,7 @@ final class ToolSlider: UIView, UIGestureRecognizerDelegate, UITextFieldDelegate
     override func layoutSubviews() {
         super.layoutSubviews()
         label.frame = CGRect(x: 0, y: 0, width: labelWidth, height: bounds.height)
-        field.frame = CGRect(x: bounds.width - fieldWidth, y: (bounds.height - 21) / 2, width: fieldWidth, height: 21)
+        field.frame = CGRect(x: bounds.width - fieldWidth, y: (bounds.height - 24) / 2, width: fieldWidth, height: 24)
         layoutTrack()
     }
 
@@ -159,7 +159,7 @@ final class ToolSlider: UIView, UIGestureRecognizerDelegate, UITextFieldDelegate
         }
         zeroLayer.isHidden = !c.centered
         zeroLayer.frame = CGRect(x: r.minX + zero * r.width - 0.5, y: r.midY - 4, width: 1, height: 8)
-        let d: CGFloat = dragging ? 16 : 12
+        let d: CGFloat = dragging ? 18 : 14
         knobLayer.frame = CGRect(x: x - d / 2, y: r.midY - d / 2, width: d, height: d)
         knobLayer.cornerRadius = d / 2
         knobLayer.backgroundColor = (dragging ? UIColor.white : Ux.knob).cgColor
@@ -633,11 +633,10 @@ final class CurveUIView: UIView, UIGestureRecognizerDelegate {
         activeDot.lineWidth = 1
         layer.borderColor = UIColor(white: 1, alpha: 0.08).cgColor
         layer.borderWidth = 0.5
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(panned(_:)))
-        pan.delegate = self
-        addGestureRecognizer(pan)
+        // one recognizer from the first contact to the lift: no drag threshold, nothing to wait for
         let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed(_:)))
         press.minimumPressDuration = 0
+        press.allowableMovement = .greatestFiniteMagnitude
         press.delegate = self
         addGestureRecognizer(press)
     }
@@ -700,7 +699,7 @@ final class CurveUIView: UIView, UIGestureRecognizerDelegate {
 
     private func nearest(_ o: CGPoint, in pts: CurvePoints) -> Int {
         var best = -1
-        var bd: CGFloat = 30
+        var bd: CGFloat = 40
         for (i, p) in pts.enumerated() {
             let q = pt(p)
             let d = hypot(q.x - o.x, q.y - o.y)
@@ -709,40 +708,37 @@ final class CurveUIView: UIView, UIGestureRecognizerDelegate {
         return best
     }
 
-    @objc private func pressed(_ g: UILongPressGestureRecognizer) {
-        // a touch picks the point under it (or adds one on the line) before any drag
-        if g.state == .ended || g.state == .cancelled {
-            if !dragging && working != nil { finish() }
-            return
-        }
-        guard g.state == .began, working == nil else { return }
-        let o = g.location(in: self)
-        var list = points
-        var i = nearest(o, in: list)
-        if i < 0 {
-            let x = max(0.01, min(0.99, o.x / bounds.width))
-            let y = max(0, min(1, 1 - o.y / bounds.height))
-            guard abs(curveAt(list, x) - y) * bounds.height < 28 else { return }
-            list.append(CGPoint(x: x, y: curveAt(list, x)))
-            list.sort { $0.x < $1.x }
-            i = list.firstIndex { $0.x == x } ?? -1
-            Haptics.tick()
-        }
-        onBegin?()
-        working = list
-        active = i
-        redraw()
-        if list.count != points.count { onChange?(list) }
-    }
+    /// Finger to point: the point moves by as much as the finger, from where it was (it never jumps
+    /// under the finger).
+    private var grab = CGPoint.zero
 
-    @objc private func panned(_ g: UIPanGestureRecognizer) {
+    @objc private func pressed(_ g: UILongPressGestureRecognizer) {
+        let o = g.location(in: self)
         switch g.state {
         case .began:
+            // the point under the finger, or a new one on the curve right there
+            var list = points
+            var i = nearest(o, in: list)
+            if i < 0 {
+                let x = max(0.01, min(0.99, o.x / bounds.width))
+                list.append(CGPoint(x: x, y: curveAt(list, x)))
+                list.sort { $0.x < $1.x }
+                i = list.firstIndex { $0.x == x } ?? -1
+                Haptics.tick()
+            }
+            guard i >= 0 else { return }
+            let q = pt(list[i])
+            grab = CGPoint(x: q.x - o.x, y: q.y - o.y)
             dragging = true
+            onBegin?()
+            working = list
+            active = i
+            redraw()
+            if list.count != points.count { onChange?(list) }
         case .changed:
             guard var list = working, active >= 0, active < list.count else { return }
             let i = active
-            let p = g.location(in: self)
+            let p = CGPoint(x: o.x + grab.x, y: o.y + grab.y)
             let w = bounds.width, h = bounds.height
             let off = p.y < -36 || p.y > h + 36 || p.x < -36 || p.x > w + 36
             if off && i > 0 && i < list.count - 1 {

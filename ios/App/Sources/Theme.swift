@@ -61,22 +61,22 @@ extension UIColor {
 /// The system's own type (San Francisco), small and dense like a desktop raw developer.
 enum Typo {
     static let display = Font.system(size: 30, weight: .semibold)
-    static let title = Font.system(size: 15, weight: .semibold)
-    static let toolTitle = Font.system(size: 12, weight: .semibold)
-    static let group = Font.system(size: 10.5, weight: .semibold)
-    static let body = Font.system(size: 13)
-    static let label = Font.system(size: 12)
-    static let labelStrong = Font.system(size: 12, weight: .medium)
-    static let value = Font.system(size: 11.5).monospacedDigit()
-    static let caption = Font.system(size: 10.5)
-    static let micro = Font.system(size: 9.5, weight: .medium)
+    static let title = Font.system(size: 16, weight: .semibold)
+    static let toolTitle = Font.system(size: 13, weight: .semibold)
+    static let group = Font.system(size: 11, weight: .semibold)
+    static let body = Font.system(size: 14)
+    static let label = Font.system(size: 13)
+    static let labelStrong = Font.system(size: 13, weight: .medium)
+    static let value = Font.system(size: 12.5).monospacedDigit()
+    static let caption = Font.system(size: 11)
+    static let micro = Font.system(size: 10, weight: .medium)
 }
 
 /// UIKit fonts for the same roles.
 enum UTypo {
-    static let label = UIFont.systemFont(ofSize: 12)
-    static let value = UIFont.monospacedDigitSystemFont(ofSize: 11.5, weight: .regular)
-    static let caption = UIFont.systemFont(ofSize: 10.5)
+    static let label = UIFont.systemFont(ofSize: 13)
+    static let value = UIFont.monospacedDigitSystemFont(ofSize: 12.5, weight: .regular)
+    static let caption = UIFont.systemFont(ofSize: 11)
 }
 
 /// Motion: quick and damped, a tool's not a toy.

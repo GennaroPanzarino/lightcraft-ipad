@@ -1,28 +1,37 @@
 import SwiftUI
 import UIKit
 
-/// The photo in the viewer: pinch to zoom (up to 5×), double tap to look closer and back, drag to
-/// look around once zoomed — the system's own scroll view, with its inertia and bounce. Not zoomed,
-/// a swipe goes to the next or previous shot. Pictures arrive straight from the engine (`show`), not
-/// through SwiftUI.
+/// The photo in the viewer: pinch to zoom (up to 16×: the photo is rendered at full size once you
+/// zoom in), double tap to look closer and back, drag to look around once zoomed — the system's own
+/// scroll view, with its inertia and bounce. Not zoomed, the photo follows a horizontal drag and the
+/// next or previous shot slides in with it, as in a gallery. Pictures arrive straight from the engine
+/// (`show`), not through SwiftUI.
 final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelegate {
     var onTap: ((CGPoint?) -> Void)?
     var onZoom: ((CGFloat) -> Void)?
-    var onSwipe: ((Int) -> Void)?
+    /// Go to the next (+1) or previous (−1) shot; `neighbor` gives its picture (nil: there is none).
+    var onPage: ((Int) -> Void)?
+    var neighbor: ((Int) -> CGImage?)?
 
     private let scroll = UIScrollView()
     private let imageView = UIImageView()
+    private let side = UIImageView()
     private var key = ""
     private var current: CGImage?
     private var held: CGImage?
     private var fitted = CGSize.zero
+    private var paging: UIPanGestureRecognizer!
+    private var sideImage: CGImage?
+    private var sideDir = 0
+    private let gap: CGFloat = 24
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
+        clipsToBounds = true
         scroll.delegate = self
         scroll.minimumZoomScale = 1
-        scroll.maximumZoomScale = 5
+        scroll.maximumZoomScale = 16
         scroll.showsVerticalScrollIndicator = false
         scroll.showsHorizontalScrollIndicator = false
         scroll.contentInsetAdjustmentBehavior = .never
@@ -33,29 +42,33 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         imageView.isUserInteractionEnabled = true
         imageView.layer.minificationFilter = .trilinear
         scroll.addSubview(imageView)
+        side.contentMode = .scaleAspectFit
+        side.isHidden = true
+        addSubview(side)
         let double = UITapGestureRecognizer(target: self, action: #selector(doubleTap(_:)))
         double.numberOfTapsRequired = 2
         scroll.addGestureRecognizer(double)
         let single = UITapGestureRecognizer(target: self, action: #selector(singleTap(_:)))
         single.require(toFail: double)
         scroll.addGestureRecognizer(single)
-        for d in [UISwipeGestureRecognizer.Direction.left, .right] {
-            let s = UISwipeGestureRecognizer(target: self, action: #selector(swiped(_:)))
-            s.direction = d
-            s.delegate = self
-            scroll.addGestureRecognizer(s)
-        }
+        paging = UIPanGestureRecognizer(target: self, action: #selector(paged(_:)))
+        paging.delegate = self
+        addGestureRecognizer(paging)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
-        if g is UISwipeGestureRecognizer { return scroll.zoomScale <= 1.01 }
+        if g === paging {
+            guard scroll.zoomScale <= 1.01 else { return false }
+            let v = paging.velocity(in: self)
+            return abs(v.x) > abs(v.y)
+        }
         return true
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        g is UISwipeGestureRecognizer
+        g === paging && other === scroll.panGestureRecognizer
     }
 
     /// A new shot: back to fit.
@@ -69,7 +82,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
 
     func show(_ image: CGImage?) {
         guard let image = image, image !== current else { return }
-        let first = current == nil
+        let first = current == nil && imageView.image == nil
         current = image
         guard held == nil else { return }
         set(image, fade: first)
@@ -85,7 +98,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     private func set(_ image: CGImage, fade: Bool) {
         let ui = UIImage(cgImage: image)
         if fade {
-            UIView.transition(with: imageView, duration: 0.18, options: [.transitionCrossDissolve, .allowUserInteraction]) {
+            UIView.transition(with: imageView, duration: 0.15, options: [.transitionCrossDissolve, .allowUserInteraction]) {
                 self.imageView.image = ui
             }
         } else {
@@ -96,21 +109,25 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        scroll.frame = bounds
+        if scroll.transform == .identity { scroll.frame = bounds }
         layoutImage(force: false)
+    }
+
+    private func fit(_ size: CGSize) -> CGSize {
+        let b = bounds.size
+        let a = size.width / max(1, size.height)
+        return b.width / max(1, b.height) > a ? CGSize(width: b.height * a, height: b.height) : CGSize(width: b.width, height: b.width / a)
     }
 
     private func layoutImage(force: Bool) {
         guard let img = imageView.image, bounds.width > 0, bounds.height > 0 else { return }
-        let b = bounds.size
-        let a = img.size.width / max(1, img.size.height)
-        let fit = b.width / b.height > a ? CGSize(width: b.height * a, height: b.height) : CGSize(width: b.width, height: b.width / a)
-        if force || abs(fit.width - fitted.width) > 0.5 || abs(fit.height - fitted.height) > 0.5 {
-            fitted = fit
+        let f = fit(img.size)
+        if force || abs(f.width - fitted.width) > 0.5 || abs(f.height - fitted.height) > 0.5 {
+            fitted = f
             let zoom = scroll.zoomScale
             scroll.zoomScale = 1
-            imageView.frame = CGRect(origin: .zero, size: fit)
-            scroll.contentSize = fit
+            imageView.frame = CGRect(origin: .zero, size: f)
+            scroll.contentSize = f
             scroll.zoomScale = zoom
         }
         center()
@@ -132,7 +149,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
             onZoom?(1)
         } else {
             let p = g.location(in: imageView)
-            let s: CGFloat = 2.5
+            let s: CGFloat = 3
             let size = CGSize(width: scroll.bounds.width / s, height: scroll.bounds.height / s)
             scroll.zoom(to: CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height), animated: true)
             onZoom?(s)
@@ -146,8 +163,71 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         onTap?(inside ? CGPoint(x: p.x / size.width, y: p.y / size.height) : nil)
     }
 
-    @objc private func swiped(_ g: UISwipeGestureRecognizer) {
-        onSwipe?(g.direction == .left ? 1 : -1)
+    // MARK: paging
+
+    /// The neighbour's picture beside the photo, `dx` the photo's offset.
+    private func placeSide(_ dx: CGFloat) {
+        let dir = dx < 0 ? 1 : -1
+        if dir != sideDir {
+            sideDir = dir
+            sideImage = neighbor?(dir)
+            side.image = sideImage.map { UIImage(cgImage: $0) }
+        }
+        guard let img = side.image else {
+            side.isHidden = true
+            return
+        }
+        side.isHidden = false
+        let f = fit(img.size)
+        let x = bounds.midX + dx + (dir > 0 ? bounds.width + gap : -(bounds.width + gap))
+        side.frame = CGRect(x: x - f.width / 2, y: bounds.midY - f.height / 2, width: f.width, height: f.height)
+    }
+
+    @objc private func paged(_ g: UIPanGestureRecognizer) {
+        let t = g.translation(in: self).x
+        switch g.state {
+        case .began:
+            sideDir = 0
+        case .changed:
+            placeSide(t)
+            // no neighbour that way: the photo resists
+            let dx = side.image == nil ? t * 0.3 : t
+            scroll.transform = CGAffineTransform(translationX: dx, y: 0)
+            if side.image == nil { side.isHidden = true }
+        default:
+            let v = g.velocity(in: self).x
+            let dir = t < 0 ? 1 : -1
+            let go = side.image != nil && g.state == .ended && (abs(t) > bounds.width * 0.22 || abs(v) > 650) && (v == 0 || (v < 0) == (t < 0))
+            if go {
+                let shift = CGFloat(-dir) * (bounds.width + gap)
+                let next = sideImage
+                UIView.animate(withDuration: 0.24, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                    self.scroll.transform = CGAffineTransform(translationX: shift, y: 0)
+                    self.placeSide(shift)
+                } completion: { _ in
+                    // the neighbour becomes the photo without a flicker; its sharp picture follows
+                    if let n = next {
+                        self.imageView.image = UIImage(cgImage: n)
+                        self.current = n
+                        self.layoutImage(force: true)
+                    }
+                    self.scroll.transform = .identity
+                    self.scroll.frame = self.bounds
+                    self.side.isHidden = true
+                    self.sideDir = 0
+                    Haptics.tick()
+                    self.onPage?(dir)
+                }
+            } else {
+                UIView.animate(withDuration: 0.22, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
+                    self.scroll.transform = .identity
+                    self.placeSide(0.001 * CGFloat(-dir))
+                } completion: { _ in
+                    self.side.isHidden = true
+                    self.sideDir = 0
+                }
+            }
+        }
     }
 }
 
@@ -162,9 +242,14 @@ struct ViewerHost: UIViewRepresentable {
         let v = PhotoViewer()
         let model = self.model
         model.loupe.onViewer = { [weak v] p in v?.show(p.image) }
-        v.onSwipe = { by in model.step(by) }
+        v.onPage = { by in model.step(by) }
+        v.neighbor = { by in model.neighborPicture(by) }
         v.onTap = { p in
-            if model.editor.picking, let p = p { model.editor.pickWhite(p) }
+            if model.editor.picking, let p = p {
+                model.editor.pickWhite(p)
+            } else {
+                withAnimation(Motion.panel) { model.chrome.toggle() }
+            }
         }
         return v
     }

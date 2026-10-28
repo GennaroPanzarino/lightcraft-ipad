@@ -8,6 +8,44 @@ struct ExportState {
     var done = 0
     var saved = 0
     var finished = false
+    var message = ""
+}
+
+/// What an export writes: Capture One's process recipe.
+struct ExportRecipe {
+    enum Format { case jpeg, tiff8, tiff16, lightroom }
+    var format: Format
+    var quality: Int
+    var edge: Int
+    var toPhotos: Bool
+
+    var ext: String {
+        switch format {
+        case .jpeg: return "jpg"
+        case .tiff8, .tiff16: return "tif"
+        case .lightroom: return "xmp"
+        }
+    }
+
+    /// The engine's export options.
+    var params: [String: Any] {
+        var p: [String: Any]
+        switch format {
+        case .jpeg: p = ["format": "jpg", "quality": quality]
+        case .tiff8: p = ["format": "tiff", "bitDepth": 8, "tiffCompression": "lzw"]
+        case .tiff16: p = ["format": "tiff", "bitDepth": 16, "tiffCompression": "zip", "colorSpace": "adobeRGB"]
+        case .lightroom: p = [:]
+        }
+        if edge > 0 { p["longEdge"] = edge }
+        return p
+    }
+}
+
+/// A thumbnail opening into the viewer: the picture and where it starts from (screen points).
+struct Hero: Identifiable {
+    let id = UUID()
+    let image: CGImage
+    let from: CGRect
 }
 
 /// Everything the app holds: settings, the two LightCraft engines, the shots, the viewer, the editor
@@ -26,7 +64,13 @@ final class AppModel: ObservableObject {
     @Published var export: ExportState?
     @Published var note: String?
     @Published var toolsShown = true
+    /// The workspace's toolbar and tools (a tap on the photo hides and shows them).
+    @Published var chrome = true
+    @Published var openSettings = false
+    @Published var hero: Hero?
     @Published private(set) var renderer = ""
+    /// Where the viewer is on screen (the zoom of a thumbnail ends there).
+    var viewerFrame: CGRect = .zero
 
     let library: Library
     let loupe: Loupe
@@ -45,15 +89,15 @@ final class AppModel: ObservableObject {
         let s = Settings.load()
         // the GPU (Metal) unless the settings say the CPU: read by the engines when they open
         if !s.gpu { setenv("LIGHTCRAFT_GPU", "0", 1) }
-        engine = Engine(dir: docs.appendingPathComponent("library"), nice: 4)
+        engine = Engine(dir: docs.appendingPathComponent("library"), nice: 4, maxEdge: 8192)
         previews = Engine(dir: previewsDir.appendingPathComponent("library"), previews: true, maxEdge: 2560)
         shotsDir = docs.appendingPathComponent("shots")
         settings = s
-        screen = s.login.complete ? .workspace : .connect
+        screen = s.login.complete ? .browser : .connect
         library = Library(engine: engine, previews: previews)
         loupe = Loupe(engine: engine)
         editor = EditorModel(engine: engine, loupe: loupe, library: library)
-        if UserDefaults.standard.string(forKey: "screen") == "browser" { screen = .browser }
+        if UserDefaults.standard.string(forKey: "screen") == "workspace" { screen = .workspace }
         wire()
         Task { await boot() }
         if s.login.complete { connect() }
@@ -117,9 +161,36 @@ final class AppModel: ObservableObject {
             ready = true
             if current == nil { current = library.shots.last?.key }
             if UserDefaults.standard.bool(forKey: "benchmark") { Task { await benchmark() } }
+            if UserDefaults.standard.bool(forKey: "exportTest") { Task { await exportTest() } }
         } catch {
             problem = error.localizedDescription
         }
+    }
+
+    /// Tests (`-exportTest YES`): the shot on screen exported every way, the results in the log.
+    private func exportTest() async {
+        for _ in 0..<200 {
+            if let k = current, let p = library.shot(k)?.photo, p != 0 { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard let k = current else { return }
+        let recipes = [
+            ExportRecipe(format: .jpeg, quality: 90, edge: 0, toPhotos: true),
+            ExportRecipe(format: .tiff16, quality: 90, edge: 0, toPhotos: true),
+            ExportRecipe(format: .tiff8, quality: 90, edge: 2048, toPhotos: false),
+            ExportRecipe(format: .lightroom, quality: 90, edge: 0, toPhotos: false),
+        ]
+        for r in recipes {
+            export = nil
+            let t = Date()
+            exportShots([k], recipe: r)
+            for _ in 0..<900 {
+                if export?.finished == true { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            NSLog("lightcraft exporttest \(r.ext) \(r.toPhotos ? "photos" : "files"): saved \(export?.saved ?? -1) in \(Int(Date().timeIntervalSince(t) * 1000)) ms \(export?.message ?? "")")
+        }
+        export = nil
     }
 
     /// Tests (`-benchmark YES`): how long a slider step (a draft) and a full picture take at the
@@ -162,7 +233,7 @@ final class AppModel: ObservableObject {
         // another camera (or login): its key is seen afresh
         if settings.login.ssid != l.ssid || settings.login.user != l.user { l.fingerprint = "" } else { l.fingerprint = settings.login.fingerprint }
         settings.login = l
-        screen = .workspace
+        screen = .browser
         connect()
     }
 
@@ -191,6 +262,25 @@ final class AppModel: ObservableObject {
 
     private func currentChanged() {
         if let k = current { editor.open(k) } else { editor.close() }
+    }
+
+    /// A shot from the browser into the viewer, zooming out of its thumbnail (`from`, screen points).
+    func open(_ key: String, from: CGRect?) {
+        current = key
+        if let f = from, let img = loupe.pics[key]?.image ?? library.shot(key)?.thumb {
+            hero = Hero(image: img, from: f)
+        }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) { screen = .workspace }
+    }
+
+    /// The picture of the shot `by` places from the one on screen (for the viewer's paging).
+    func neighborPicture(_ by: Int) -> CGImage? {
+        let list = library.shots.filter { $0.stage != .failed }
+        guard let i = list.firstIndex(where: { $0.key == current }), i + by >= 0, i + by < list.count else { return nil }
+        let s = list[i + by]
+        return loupe.pics[s.key]?.image ?? s.thumb
     }
 
     func step(_ by: Int) {
@@ -350,19 +440,19 @@ final class AppModel: ObservableObject {
         if selection.contains(key) { selection.remove(key) } else { selection.insert(key) }
     }
 
-    /// The shots as JPEGs, with their edits: into Photos, or to the share sheet (Files, AirDrop…).
-    func exportShots(_ keys: Set<String>, quality: Int, edge: Int, toPhotos: Bool) {
+    /// The shots with their edits, as the recipe says: JPEG or TIFF into Photos or to the share sheet
+    /// (Files, AirDrop…), or each one's look as a Lightroom preset.
+    func exportShots(_ keys: Set<String>, recipe: ExportRecipe) {
         let list = library.shots.filter { keys.contains($0.key) && $0.photo != 0 }
         guard !list.isEmpty, export?.finished != false else { return }
-        settings.exportQuality = quality
-        settings.exportEdge = edge
+        if recipe.format == .jpeg { settings.exportQuality = recipe.quality }
+        settings.exportEdge = recipe.edge
         export = ExportState(total: list.count)
         Task {
-            if toPhotos {
+            if recipe.toPhotos {
                 let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
                 guard status == .authorized || status == .limited else {
-                    export = ExportState(total: list.count, done: list.count, saved: 0, finished: true)
-                    say("Consenti l'accesso a Foto nelle Impostazioni dell'iPad")
+                    export = ExportState(total: list.count, done: list.count, saved: 0, finished: true, message: "Consenti l'accesso a Foto nelle Impostazioni dell'iPad.")
                     return
                 }
             }
@@ -370,29 +460,51 @@ final class AppModel: ObservableObject {
             try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
             var saved = 0
             var files: [URL] = []
+            var failure = ""
             for (i, s) in list.enumerated() {
                 export?.done = i
-                let url = tmp.appendingPathComponent("\(s.key).jpg")
+                let url = tmp.appendingPathComponent("\(s.key).\(recipe.ext)")
                 do {
-                    try await engine.exportJpeg(s.photo, to: url, quality: quality, longEdge: edge)
-                    if toPhotos {
-                        try await PHPhotoLibrary.shared().performChanges {
-                            let req = PHAssetCreationRequest.forAsset()
-                            let opts = PHAssetResourceCreationOptions()
-                            opts.originalFilename = "\(s.key).jpg"
-                            req.addResource(with: .photo, fileURL: url, options: opts)
-                        }
+                    if recipe.format == .lightroom {
+                        let settings = try await engine.object("develop.get", ["id": s.photo])
+                        _ = try await engine.exec("preset.xmpFromSettings", ["settings": settings, "name": s.key, "group": "LightCraft", "path": url.path])
+                    } else {
+                        try await engine.export(s.photo, to: url, params: recipe.params)
+                    }
+                    if recipe.toPhotos {
+                        try await AppModel.saveToPhotos(url, name: url.lastPathComponent)
                         try? FileManager.default.removeItem(at: url)
                     } else {
                         files.append(url)
                     }
                     saved += 1
                 } catch {
+                    failure = error.localizedDescription
                     NSLog("lightcraft export \(s.key): \(error)")
                 }
             }
-            export = ExportState(total: list.count, done: list.count, saved: saved, finished: true)
-            if !toPhotos && !files.isEmpty { Share.present(files) }
+            let message: String
+            if saved == 0 {
+                message = failure.isEmpty ? "Esportazione non riuscita." : failure
+            } else if recipe.toPhotos {
+                message = "Le trovi nell'app Foto."
+            } else {
+                message = "Scegli dove salvarli nel pannello di condivisione."
+            }
+            export = ExportState(total: list.count, done: list.count, saved: saved, finished: true, message: message)
+            NSLog("lightcraft export: \(saved) of \(list.count) saved \(recipe.ext)")
+            if !recipe.toPhotos && !files.isEmpty { Share.present(files) }
+        }
+    }
+
+    /// A file into the Photos library (off the main actor: Photos runs the change block on its own
+    /// queue).
+    nonisolated static func saveToPhotos(_ url: URL, name: String) async throws {
+        try await PHPhotoLibrary.shared().performChanges {
+            let req = PHAssetCreationRequest.forAsset()
+            let opts = PHAssetResourceCreationOptions()
+            opts.originalFilename = name
+            req.addResource(with: .photo, fileURL: url, options: opts)
         }
     }
 

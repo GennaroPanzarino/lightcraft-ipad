@@ -24,9 +24,10 @@ final class Engine: @unchecked Sendable {
     private let dir: URL
     private let nice: Int32
     private let previews: Bool
-    /// Where the pixels come back (the largest picture asked for).
-    private let buffer: UnsafeMutablePointer<UInt8>
-    private let capacity: Int
+    /// Where the pixels come back: grown to the largest picture asked for so far (a full-size one
+    /// only when the viewer zooms in).
+    private var buffer: UnsafeMutablePointer<UInt8>
+    private var capacity: Int
     let maxEdge: Int
 
     init(dir: URL, nice: Int32 = 0, previews: Bool = false, maxEdge: Int = 4096) {
@@ -35,7 +36,7 @@ final class Engine: @unchecked Sendable {
         self.previews = previews
         self.maxEdge = maxEdge
         queue = DispatchQueue(label: previews ? "lightcraft-previews" : "lightcraft-engine", qos: previews ? .userInitiated : .utility)
-        capacity = maxEdge * maxEdge * 4
+        capacity = 2560 * 2560 * 4
         buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
     }
 
@@ -111,8 +112,18 @@ final class Engine: @unchecked Sendable {
 
     private func clamp(_ v: Int) -> UInt32 { UInt32(max(8, min(maxEdge, v))) }
 
+    /// Room for a `w × h` picture (on the queue).
+    private func room(_ w: Int, _ h: Int) {
+        let need = Int(clamp(w)) * Int(clamp(h)) * 4
+        guard need > capacity else { return }
+        buffer.deallocate()
+        capacity = need
+        buffer = UnsafeMutablePointer<UInt8>.allocate(capacity: capacity)
+    }
+
     func renderNow(_ photo: Int64, _ w: Int, _ h: Int, draft: Bool) throws -> Rendered {
-        try picture(take(lc_render(handle, UInt64(photo), clamp(w), clamp(h), draft, buffer, capacity)))
+        room(w, h)
+        return try picture(take(lc_render(handle, UInt64(photo), clamp(w), clamp(h), draft, buffer, capacity)))
     }
 
     // ---- what the app calls
@@ -139,7 +150,10 @@ final class Engine: @unchecked Sendable {
     }
 
     func renderBefore(_ photo: Int64, _ w: Int, _ h: Int) async throws -> Rendered {
-        try await run { try self.picture(self.take(lc_render_before(self.handle, UInt64(photo), self.clamp(w), self.clamp(h), self.buffer, self.capacity))) }
+        try await run {
+            self.room(w, h)
+            return try self.picture(self.take(lc_render_before(self.handle, UInt64(photo), self.clamp(w), self.clamp(h), self.buffer, self.capacity)))
+        }
     }
 
     func thumb(_ photo: Int64, edge: Int) async throws -> Rendered {
@@ -150,6 +164,14 @@ final class Engine: @unchecked Sendable {
     func variant(_ photo: Int64, preset: String, amount: Int = 100, edge: Int = 220) async throws -> Rendered {
         try await run {
             try self.picture(preset.withCString { p in self.take(lc_render_variant(self.handle, UInt64(photo), p, Int32(amount), UInt32(edge), self.buffer, self.capacity)) })
+        }
+    }
+
+    /// The photo as a file: `params` the engine's export options (format, quality, bitDepth, longEdge…).
+    func export(_ photo: Int64, to url: URL, params: [String: Any]) async throws {
+        let json = String(data: (try? JSONSerialization.data(withJSONObject: params)) ?? Data("{}".utf8), encoding: .utf8) ?? "{}"
+        _ = try await run {
+            try self.parse(url.path.withCString { p in json.withCString { q in self.take(lc_export(self.handle, UInt64(photo), p, q)) } })
         }
     }
 

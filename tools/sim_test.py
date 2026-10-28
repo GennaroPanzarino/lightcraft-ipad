@@ -68,7 +68,7 @@ env = dict(os.environ, FAKE_RATE="20000000", FAKE_EVERY="12")
 cam = subprocess.Popen([sys.executable, "tools/fake_ptp_camera.py", *RAWS], stdout=open(os.path.join(OUT, "camera.log"), "w"), stderr=subprocess.STDOUT, env=env)
 time.sleep(1)
 t0 = time.time()
-launch("-landscape", "YES", "-tool", "exposure")
+launch("-screen", "workspace", "-tool", "exposure")
 for t in [4, 9, 14, 20, 28, 36]:
     while time.time() - t0 < t:
         time.sleep(0.2)
@@ -76,27 +76,27 @@ for t in [4, 9, 14, 20, 28, 36]:
 cam.terminate()
 
 # 3. each tool group, the browser, portrait
-for tool in ["color", "details", "adjustments", "lens", "metadata", "capture"]:
-    launch("-landscape", "YES", "-tool", tool)
+for tool in ["color", "details", "adjustments", "metadata", "capture"]:
+    launch("-screen", "workspace", "-tool", tool)
     time.sleep(9)
     shot(f"03_{tool}")
-launch("-landscape", "YES", "-screen", "browser")
+launch()
 time.sleep(8)
-shot("04_browser")
-launch("-tool", "exposure")
-time.sleep(9)
-shot("05_portrait")
-launch("-screen", "browser")
-time.sleep(7)
-shot("06_portrait_browser")
-launch("-landscape", "YES", "-tool", "exposure", "-benchmark", "YES")
+shot("04_browser_at_start")
+launch("-screen", "workspace", "-tool", "exposure", "-benchmark", "YES")
 time.sleep(24)
-shot("07_benchmark")
+shot("05_benchmark")
+# every export of the shot on screen (Photos allowed beforehand)
+sh("xcrun", "simctl", "privacy", udid, "grant", "photos-add", BUNDLE, check=False)
+sh("xcrun", "simctl", "privacy", udid, "grant", "photos", BUNDLE, check=False)
+launch("-screen", "workspace", "-exportTest", "YES")
+time.sleep(70)
+shot("06_after_exports")
 
 log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "8m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
 open(os.path.join(OUT, "app.log"), "w").write(log)
 crashes = sh("bash", "-c", "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i lightcraft || true").stdout
 print("crash reports:", crashes or "none")
 for line in log.splitlines():
-    if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "rotate", "error", "Error")):
+    if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "export", "error", "Error")):
         print(line[:300])

@@ -150,6 +150,25 @@ fn export_xmp(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"paths": paths, "count": chosen.len()}))
 }
 
+/// A photo's look (settings as `develop.get` gives them) as one Lightroom / Camera Raw XMP preset.
+fn xmp_from_settings(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "preset.xmpFromSettings";
+    let path = str_param(p, "path").filter(|x| !x.trim().is_empty()).ok_or_else(|| bad(c, "missing path"))?;
+    let mut settings = p.get("settings").cloned().filter(Value::is_object).ok_or_else(|| bad(c, "missing settings"))?;
+    if let Some(o) = settings.as_object_mut() {
+        // a look, not this photo's framing or retouching
+        for k in ["crop", "masks", "spots", "red_eye", "point_colors", "orientation", "version", "process"] {
+            o.remove(k);
+        }
+    }
+    let name = str_param(p, "name").map(str::trim).filter(|n| !n.is_empty()).unwrap_or("LightCraft").to_string();
+    let group = str_param(p, "group").map(str::trim).filter(|g| !g.is_empty()).unwrap_or("LightCraft").to_string();
+    let preset = lightcraft_develop::Preset { id: format!("photo.{}", crate::presets::slug(&name)), name, group, settings, favorite: false, builtin: false };
+    s.check_write_target(path).map_err(|e| bad(c, e))?;
+    crate::export::write_file_durable(path, crate::crs_write::preset_to_xmp(&preset).as_bytes()).map_err(crate::EngineError::Other)?;
+    Ok(json!({"path": path}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -178,6 +197,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{dir, ids?: [presetId], group?: name} (default: all user presets) → {paths, count}; one Lightroom / Camera Raw XMP preset per preset (crs: fields, the inverse of the import mapping in docs/xmp-interop.md; profiles, masks and spots stay out)",
             always,
             export_xmp
+        ),
+        cmd!(
+            "preset.xmpFromSettings",
+            "Save a Photo's Look for Lightroom",
+            [],
+            None,
+            "{settings: develop settings (develop.get), name, group?, path} → {path}; one Lightroom / Camera Raw XMP preset with the look (crop, masks, spots and red eye left out)",
+            always,
+            xmp_from_settings
         ),
     ]
 }

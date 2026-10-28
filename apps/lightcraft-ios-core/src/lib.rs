@@ -191,6 +191,19 @@ pub unsafe extern "C" fn lc_export_jpeg(h: *mut c_void, photo: u64, path: *const
     with_core(h, move |c| c.export_jpeg(photo, &path, quality.clamp(1, 100) as u8, long))
 }
 
+/// The photo as a file at `path`, `params` the engine's export options as JSON (format, quality,
+/// bitDepth, longEdge…).
+///
+/// # Safety
+/// `h` from `lc_open`; `path` and `params` NUL-terminated.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lc_export(h: *mut c_void, photo: u64, path: *const c_char, params: *const c_char) -> *mut c_char {
+    // SAFETY: as documented.
+    let (path, params) = unsafe { (text(path), text(params)) };
+    let params: Value = serde_json::from_str(&params).unwrap_or(json!({}));
+    with_core(h, move |c| c.export(photo, &path, &params))
+}
+
 /// Start the camera link (`config`: `{host?, user, password, fingerprint?, plain?, saveDir, raw}`).
 ///
 /// # Safety
