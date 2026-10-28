@@ -1,13 +1,15 @@
 import SwiftUI
+import UIKit
 
 /// How a slider's track is drawn.
 enum Track {
     case plain
     case centered
-    case gradient([Color])
+    case gradient([UIColor])
 }
 
-/// One of LightCraft's develop controls (its id, as `develop.set` takes it).
+/// One of LightCraft's develop controls (its id, as `develop.set` takes it), with the range the
+/// engine gives and the name the app shows.
 struct Control {
     let id: String
     let label: String
@@ -21,9 +23,10 @@ struct Control {
     var centered: Bool { min < 0 && max > 0 }
 
     func format(_ v: Double) -> String {
-        if id == "wb.temp" { return "\(Int(v.rounded())) K" }
         let s = decimals > 0 ? String(format: "%.\(decimals)f", v) : "\(Int(v.rounded()))"
-        return centered && v > 0 && Double(s) != 0 ? "+" + s : s
+        let zero = Double(s) == 0
+        if zero { return decimals > 0 ? String(format: "%.\(decimals)f", 0.0) : "0" }
+        return centered && v > 0 ? "+" + s : s
     }
 
     func snap(_ v: Double) -> Double {
@@ -32,45 +35,70 @@ struct Control {
     }
 }
 
-/// The HSL bands.
+/// The colour editor's bands.
 enum Band: String, CaseIterable, Identifiable {
     case red, orange, yellow, green, aqua, blue, purple, magenta
     var id: String { rawValue }
     var label: String {
-        ["red": "Rossi", "orange": "Arancioni", "yellow": "Gialli", "green": "Verdi", "aqua": "Acqua", "blue": "Blu", "purple": "Viola", "magenta": "Magenta"][rawValue] ?? rawValue
-    }
-    var color: Color {
         switch self {
-        case .red: return Color(hex: 0xE5484D)
-        case .orange: return Color(hex: 0xF08A3C)
-        case .yellow: return Color(hex: 0xF2D14A)
-        case .green: return Color(hex: 0x46B85A)
-        case .aqua: return Color(hex: 0x3FC6C6)
-        case .blue: return Color(hex: 0x3E7BE6)
-        case .purple: return Color(hex: 0x8B5CE6)
-        case .magenta: return Color(hex: 0xD94FB0)
+        case .red: return "Rossi"
+        case .orange: return "Arancioni"
+        case .yellow: return "Gialli"
+        case .green: return "Verdi"
+        case .aqua: return "Acqua"
+        case .blue: return "Blu"
+        case .purple: return "Viola"
+        case .magenta: return "Magenta"
         }
     }
+    var hex: UInt32 {
+        switch self {
+        case .red: return 0xE5484D
+        case .orange: return 0xF08A3C
+        case .yellow: return 0xF2D14A
+        case .green: return 0x46B85A
+        case .aqua: return 0x3FC6C6
+        case .blue: return 0x3E7BE6
+        case .purple: return 0x8B5CE6
+        case .magenta: return 0xD94FB0
+        }
+    }
+    var color: Color { Color(hex: hex) }
+    var ui: UIColor { UIColor(hex: hex) }
 }
 
-/// The Color Grading wheels.
+/// The colour balance zones.
 enum Zone: String, CaseIterable, Identifiable {
     case shadows, midtones, highlights, global
     var id: String { rawValue }
-    var label: String { ["shadows": "Ombre", "midtones": "Mezzitoni", "highlights": "Luci", "global": "Globale"][rawValue] ?? rawValue }
+    var label: String {
+        switch self {
+        case .shadows: return "Ombre"
+        case .midtones: return "Mezzitoni"
+        case .highlights: return "Alteluci"
+        case .global: return "Master"
+        }
+    }
 }
 
 /// A point curve channel.
 enum Channel: String, CaseIterable, Identifiable {
     case master, red, green, blue
     var id: String { rawValue }
-    var label: String { self == .master ? "RGB" : String(rawValue.prefix(1)).uppercased() }
-    var color: Color {
+    var label: String {
         switch self {
-        case .master: return Color(hex: 0xEDEDED)
-        case .red: return Color(hex: 0xE5484D)
-        case .green: return Color(hex: 0x46B85A)
-        case .blue: return Color(hex: 0x3E7BE6)
+        case .master: return "RGB"
+        case .red: return "R"
+        case .green: return "G"
+        case .blue: return "B"
+        }
+    }
+    var ui: UIColor {
+        switch self {
+        case .master: return UIColor(hex: 0xE6E6E9)
+        case .red: return UIColor(hex: 0xE5484D)
+        case .green: return UIColor(hex: 0x46B85A)
+        case .blue: return UIColor(hex: 0x3E7BE6)
         }
     }
 }
@@ -80,7 +108,7 @@ typealias CurvePoints = [CGPoint]
 /// A curve's points (0…1) from `develop.get` (none: the straight line).
 func curvePoints(_ develop: [String: Any], _ ch: Channel) -> CurvePoints {
     let a = (develop["curve"] as? [String: Any])?[ch.rawValue] as? [Any] ?? []
-    var pts: [CGPoint] = a.compactMap { p in
+    var pts: [CGPoint] = a.compactMap { p -> CGPoint? in
         if let o = p as? [String: Any] { return CGPoint(x: double(o["x"]), y: double(o["y"])) }
         if let l = p as? [Any], l.count >= 2 { return CGPoint(x: double(l[0]), y: double(l[1])) }
         return nil
@@ -118,7 +146,7 @@ func curveAt(_ pts: CurvePoints, _ x: CGFloat) -> CGFloat {
     return h00 * pts[i].y + h10 * h * t[i] + h01 * pts[i + 1].y + h11 * h * t[i + 1]
 }
 
-/// A preset of LightCraft's (`presets.list`).
+/// A preset (a Capture One style) of LightCraft's (`presets.list`).
 struct Preset: Identifiable, Equatable {
     let id: String
     let name: String
@@ -126,88 +154,102 @@ struct Preset: Identifiable, Equatable {
     let builtin: Bool
 }
 
+/// A camera profile (`profiles.list`): Capture One's base characteristics.
+struct Profile: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let group: String
+}
+
 func groupLabel(_ g: String) -> String {
-    [
-        "Color": "Colore", "Film": "Pellicola", "B&W": "B&N", "Landscape": "Paesaggio", "Portrait": "Ritratto",
-        "Seasons": "Stagioni", "Style": "Stile", "Urban": "Città", "Food": "Cibo", "Vintage": "Vintage", "User Presets": "I miei preset",
-    ][g] ?? g
+    let names = [
+        "Color": "Colore", "Film": "Pellicola", "B&W": "Bianco e nero", "Landscape": "Paesaggio", "Portrait": "Ritratto",
+        "Seasons": "Stagioni", "Style": "Stile", "Urban": "Città", "Food": "Cibo", "Vintage": "Vintage", "User Presets": "I miei stili",
+        "Imported Presets": "Importati", "Basic": "Base", "Cinematic": "Cinema", "Muted": "Tenui",
+    ]
+    return names[g] ?? g
 }
 
 enum Controls {
-    private static let rainbow: [Color] = [0xFF4D4D, 0xFFB34D, 0xFFFF4D, 0x4DFF4D, 0x4DFFFF, 0x4D4DFF, 0xFF4DFF, 0xFF4D4D].map { Color(hex: $0) }
-
-    /// Every control the app shows, with its Italian name and look; ranges come from the engine.
-    private static let local: [String: (String, Track)] = {
-        var m: [String: (String, Track)] = [:]
-        func c(_ id: String, _ label: String, _ track: Track = .centered) { m[id] = (label, track) }
-        c("light.exposure", "Esposizione")
-        c("light.contrast", "Contrasto")
-        c("light.highlights", "Luci")
-        c("light.shadows", "Ombre")
-        c("light.whites", "Bianchi")
-        c("light.blacks", "Neri")
-        c("wb.temp", "Temperatura", .gradient([Color(hex: 0x3B6FD8), Color(hex: 0xDADADA), Color(hex: 0xE8B83A)]))
-        c("wb.tint", "Tinta", .gradient([Color(hex: 0x3FAE5A), Color(hex: 0xDADADA), Color(hex: 0xD94FB0)]))
-        c("color.vibrance", "Vividezza", .gradient([Color(hex: 0x7A7A7A), Color(hex: 0xD8406A)]))
-        c("color.saturation", "Saturazione", .gradient([Color(hex: 0x7A7A7A), Color(hex: 0xE04A3A)]))
-        c("effects.texture", "Texture")
-        c("effects.clarity", "Chiarezza")
-        c("effects.dehaze", "Rimuovi foschia")
-        c("vignette.amount", "Vignettatura")
-        c("vignette.midpoint", "Punto medio", .plain)
-        c("vignette.roundness", "Rotondità")
-        c("vignette.feather", "Sfumatura", .plain)
-        c("grain.amount", "Grana", .plain)
-        c("grain.size", "Dimensione", .plain)
-        c("grain.roughness", "Ruvidezza", .plain)
-        c("detail.sharpenAmount", "Nitidezza", .plain)
-        c("detail.sharpenRadius", "Raggio", .plain)
-        c("detail.sharpenDetail", "Dettaglio", .plain)
-        c("detail.sharpenMasking", "Mascheratura", .plain)
-        c("detail.nrLuminance", "Riduzione rumore", .plain)
-        c("detail.nrDetail", "Dettaglio", .plain)
-        c("detail.nrContrast", "Contrasto", .plain)
-        c("detail.nrColor", "Rumore colore", .plain)
-        c("detail.nrColorDetail", "Dettaglio", .plain)
-        c("detail.nrColorSmoothness", "Uniformità", .plain)
-        c("curve.highlights", "Luci")
-        c("curve.lights", "Chiari")
-        c("curve.darks", "Scuri")
-        c("curve.shadows", "Ombre")
+    /// The app's names for the engine's controls (Capture One's, in Italian).
+    static let names: [String: String] = {
+        var m: [String: String] = [
+            "light.exposure": "Esposizione", "light.contrast": "Contrasto", "light.highlights": "Alteluci",
+            "light.shadows": "Ombre", "light.whites": "Bianco", "light.blacks": "Nero",
+            "color.vibrance": "Vividezza", "color.saturation": "Saturazione", "wb.temp": "Kelvin", "wb.tint": "Tinta",
+            "effects.texture": "Struttura", "effects.clarity": "Chiarezza", "effects.dehaze": "Quantità",
+            "vignette.amount": "Quantità", "vignette.midpoint": "Punto medio", "vignette.roundness": "Rotondità",
+            "vignette.feather": "Sfumatura", "vignette.highlights": "Alteluci",
+            "grain.amount": "Impatto", "grain.size": "Granularità", "grain.roughness": "Ruvidezza",
+            "detail.sharpenAmount": "Quantità", "detail.sharpenRadius": "Raggio", "detail.sharpenDetail": "Dettaglio",
+            "detail.sharpenMasking": "Soglia", "detail.nrLuminance": "Luminanza", "detail.nrDetail": "Dettaglio",
+            "detail.nrContrast": "Contrasto", "detail.nrColor": "Colore", "detail.nrColorDetail": "Dettaglio colore",
+            "detail.nrColorSmoothness": "Uniformità",
+            "curve.highlights": "Alteluci", "curve.lights": "Chiari", "curve.darks": "Scuri", "curve.shadows": "Ombre",
+            "curve.splitShadows": "Divisione ombre", "curve.splitMid": "Divisione medi", "curve.splitHighlights": "Divisione luci",
+            "curve.refineSaturation": "Saturazione",
+            "optics.distortion": "Distorsione", "optics.vignetting": "Caduta di luce", "optics.vignettingMidpoint": "Punto medio",
+            "optics.profileDistortion": "Distorsione", "optics.profileVignetting": "Caduta di luce",
+            "optics.defringePurple": "Viola", "optics.defringePurpleHueLo": "Viola da", "optics.defringePurpleHueHi": "Viola a",
+            "optics.defringeGreen": "Verde", "optics.defringeGreenHueLo": "Verde da", "optics.defringeGreenHueHi": "Verde a",
+            "optics.caRed": "Rosso / ciano", "optics.caBlue": "Blu / giallo",
+            "geometry.vertical": "Verticale", "geometry.horizontal": "Orizzontale", "geometry.rotate": "Rotazione",
+            "geometry.aspect": "Proporzioni", "geometry.scale": "Scala", "geometry.offsetX": "Sposta X", "geometry.offsetY": "Sposta Y",
+            "crop.angle": "Raddrizza",
+            "calibration.shadowsTint": "Tinta ombre", "calibration.redHue": "Rosso tonalità", "calibration.redSat": "Rosso satur.",
+            "calibration.greenHue": "Verde tonalità", "calibration.greenSat": "Verde satur.", "calibration.blueHue": "Blu tonalità",
+            "calibration.blueSat": "Blu satur.",
+            "profile.amount": "Quantità", "grading.blending": "Fusione", "grading.balance": "Bilanciamento",
+        ]
         for b in Band.allCases {
-            c("mixer.\(b.rawValue).hue", "Tonalità", .gradient([b.color.opacity(0.6), b.color, b.color.opacity(0.6)]))
-            c("mixer.\(b.rawValue).sat", "Saturazione", .gradient([Color(hex: 0x808080), b.color]))
-            c("mixer.\(b.rawValue).lum", "Luminanza", .gradient([Color(hex: 0x151515), b.color, Color(hex: 0xF5F5F5)]))
+            m["bw.\(b.rawValue)"] = b.label
+            m["mixer.\(b.rawValue).hue"] = "Tonalità"
+            m["mixer.\(b.rawValue).sat"] = "Saturazione"
+            m["mixer.\(b.rawValue).lum"] = "Luminosità"
         }
         for z in Zone.allCases {
-            c("grading.\(z.rawValue).hue", "Tonalità", .gradient(rainbow))
-            c("grading.\(z.rawValue).sat", "Saturazione", .plain)
-            c("grading.\(z.rawValue).lum", "Luminanza", .gradient([Color(hex: 0x151515), Color(hex: 0xF5F5F5)]))
+            m["grading.\(z.rawValue).hue"] = "Tonalità"
+            m["grading.\(z.rawValue).sat"] = "Saturazione"
+            m["grading.\(z.rawValue).lum"] = "Luminosità"
         }
-        c("grading.blending", "Fusione", .plain)
-        c("grading.balance", "Bilanciamento")
         return m
     }()
 
-    static let light = ["light.exposure", "light.contrast", "light.highlights", "light.shadows", "light.whites", "light.blacks"]
-    static let effects = ["effects.texture", "effects.clarity", "effects.dehaze"]
-    static let vignette = ["vignette.amount", "vignette.midpoint", "vignette.roundness", "vignette.feather"]
-    static let grain = ["grain.amount", "grain.size", "grain.roughness"]
-    static let sharpen = ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"]
-    static let noise = ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast"]
-    static let colorNoise = ["detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"]
-    static let parametric = ["curve.highlights", "curve.lights", "curve.darks", "curve.shadows"]
+    /// Tracks the app draws its own way (the engine's otherwise).
+    static func track(_ id: String) -> Track? {
+        let gray = UIColor(hex: 0x7A7A7A)
+        if id == "wb.temp" { return .gradient([UIColor(hex: 0x3B6FD8), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xE8B83A)]) }
+        if id == "wb.tint" { return .gradient([UIColor(hex: 0x3FAE5A), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xD94FB0)]) }
+        for b in Band.allCases {
+            if id == "mixer.\(b.rawValue).hue" { return .gradient([b.ui.withAlphaComponent(0.55), b.ui, b.ui.withAlphaComponent(0.55)]) }
+            if id == "mixer.\(b.rawValue).sat" { return .gradient([gray, b.ui]) }
+            if id == "mixer.\(b.rawValue).lum" { return .gradient([UIColor(hex: 0x151515), b.ui, UIColor(hex: 0xF5F5F5)]) }
+        }
+        if id.hasPrefix("grading.") && id.hasSuffix(".lum") { return .gradient([UIColor(hex: 0x151515), UIColor(hex: 0xF5F5F5)]) }
+        return nil
+    }
 
-    /// The controls from `develop.controls`, named and drawn the app's way.
+    static func engineTrack(_ t: Any?) -> Track {
+        guard let o = t as? [String: Any] else { return .plain }
+        switch o.str("kind") {
+        case "centered": return .centered
+        case "gradient":
+            if let a = UIColor(css: o.str("from")), let b = UIColor(css: o.str("to")) { return .gradient([a, b]) }
+            return .plain
+        default: return .plain
+        }
+    }
+
+    /// Every control the engine has, named and drawn the app's way.
     static func from(_ engine: [[String: Any]]) -> [String: Control] {
         var out: [String: Control] = [:]
         for o in engine {
             let id = o.str("id")
-            guard let entry = local[id] else { continue }
-            let (label, track) = entry
+            guard !id.isEmpty else { continue }
             out[id] = Control(
-                id: id, label: label, min: double(o["min"]), max: double(o["max"]), def: double(o["default"]),
-                step: (o["step"] as? NSNumber)?.doubleValue ?? 1, decimals: Int(int64(o["decimals"])), track: track
+                id: id, label: names[id] ?? o.str("label"), min: double(o["min"]), max: double(o["max"]), def: double(o["default"]),
+                step: (o["step"] as? NSNumber)?.doubleValue ?? 1, decimals: Int(int64(o["decimals"])),
+                track: track(id) ?? engineTrack(o["track"])
             )
         }
         return out
@@ -217,5 +259,63 @@ enum Controls {
         var out: [String: Double] = [:]
         for o in engine { out[o.str("id")] = double(o["value"]) }
         return out
+    }
+}
+
+/// The photo's slider values, shared by every control that shows one: a change made on one reaches
+/// the others and the engine without SwiftUI drawing anything again.
+@MainActor
+final class DevelopStore {
+    private struct Observer {
+        weak var owner: AnyObject?
+        let ids: Set<String>
+        let fn: (String, Double) -> Void
+    }
+
+    private(set) var controls: [String: Control] = [:]
+    private(set) var values: [String: Double] = [:]
+    private var observers: [Observer] = []
+    /// A change by the user (a slider, a wheel): the engine gets it.
+    var onChange: ((String, Double) -> Void)?
+    /// A gesture starts (one undo step) and ends.
+    var onBegin: ((String) -> Void)?
+    var onEnd: (() -> Void)?
+    /// Whether there is a photo to change.
+    var enabled = false {
+        didSet { if enabled != oldValue { notifyAll() } }
+    }
+
+    func setControls(_ c: [String: Control]) { controls = c }
+    func control(_ id: String) -> Control? { controls[id] }
+    func value(_ id: String) -> Double { values[id] ?? controls[id]?.def ?? 0 }
+
+    func observe(_ ids: [String], owner: AnyObject, _ fn: @escaping (String, Double) -> Void) {
+        observers.removeAll { $0.owner == nil || $0.owner === owner && $0.ids == Set(ids) }
+        observers.append(Observer(owner: owner, ids: Set(ids), fn: fn))
+        for id in ids { fn(id, value(id)) }
+    }
+
+    func forget(_ owner: AnyObject) {
+        observers.removeAll { $0.owner == nil || $0.owner === owner }
+    }
+
+    /// The values as LightCraft has them (a new photo, undo, a preset).
+    func load(_ v: [String: Double]) {
+        values = v
+        notifyAll()
+    }
+
+    /// The user changed `id` on `source`: the others showing it follow, the engine gets it.
+    func userSet(_ id: String, _ v: Double, from source: AnyObject?) {
+        values[id] = v
+        for o in observers where o.ids.contains(id) && o.owner !== source { o.fn(id, v) }
+        onChange?(id, v)
+    }
+
+    private func notifyAll() {
+        observers.removeAll { $0.owner == nil }
+        for o in observers {
+            for id in o.ids { o.fn(id, value(id)) }
+        }
     }
 }

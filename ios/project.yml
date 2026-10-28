@@ -20,15 +20,13 @@ targets:
     platform: iOS
     sources:
       - path: App/Sources
-      - path: App/Fonts
-        buildPhase: resources
       - path: App/Assets.xcassets
     info:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: LightCraft
-        CFBundleShortVersionString: "1.0"
-        CFBundleVersion: "1"
+        CFBundleShortVersionString: "2.0"
+        CFBundleVersion: "2"
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UIRequiresFullScreen: false
@@ -39,12 +37,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         UIStatusBarStyle: UIStatusBarStyleLightContent
         UIViewControllerBasedStatusBarAppearance: false
-        UIAppFonts:
-          - inter_regular.ttf
-          - inter_medium.ttf
-          - inter_semibold.ttf
-          - inter_bold.ttf
-          - inter_display_semibold.ttf
+        UIStatusBarHidden: true
         NSLocalNetworkUsageDescription: "LightCraft si collega alla fotocamera sulla sua rete Wi-Fi."
         NSPhotoLibraryAddUsageDescription: "LightCraft salva nella libreria Foto le immagini che esporti."
         UIFileSharingEnabled: true

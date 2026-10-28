@@ -1,8 +1,7 @@
-import Combine
 import Photos
 import SwiftUI
 
-enum Screen { case connect, session, editor, library }
+enum Screen { case connect, workspace, browser }
 
 struct ExportState {
     let total: Int
@@ -12,22 +11,22 @@ struct ExportState {
 }
 
 /// Everything the app holds: settings, the two LightCraft engines, the shots, the viewer, the editor
-/// and the camera link.
+/// and the camera link. Views observe the parts they show (the library, the link, the editor), not
+/// this: a shot arriving redraws the filmstrip, not the tools.
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var settings: Settings { didSet { settings.save() } }
+    @Published var settings: Settings { didSet { if settings != oldValue { settings.save() } } }
     @Published var screen: Screen
-    @Published var current: String?
+    @Published var current: String? { didSet { if current != oldValue { currentChanged() } } }
     @Published var selection = Set<String>()
     @Published private(set) var ready = false
     @Published private(set) var problem: String?
-    @Published private(set) var controls: [String: Control] = [:]
     @Published private(set) var presets: [Preset] = []
+    @Published private(set) var profiles: [Profile] = []
     @Published var export: ExportState?
     @Published var note: String?
-    /// Modifica touched before the raw was in: the editor opens when it is.
-    @Published var pendingEdit: String?
-    @Published var variants: [String: CGImage] = [:]
+    @Published var toolsShown = true
+    @Published private(set) var renderer = ""
 
     let library: Library
     let loupe: Loupe
@@ -36,23 +35,25 @@ final class AppModel: ObservableObject {
     private let engine: Engine
     private let previews: Engine
     private let shotsDir: URL
-    private var bag = Set<AnyCancellable>()
     private var noteTask: Task<Void, Never>?
-    private var variantsTask: Task<Void, Never>?
+    private var pendingFollow: String?
 
     init() {
         let docs = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let previewsDir = docs.appendingPathComponent("previews")
         try? FileManager.default.removeItem(at: previewsDir)
+        let s = Settings.load()
+        // the GPU (Metal) unless the settings say the CPU: read by the engines when they open
+        if !s.gpu { setenv("LIGHTCRAFT_GPU", "0", 1) }
         engine = Engine(dir: docs.appendingPathComponent("library"), nice: 4)
         previews = Engine(dir: previewsDir.appendingPathComponent("library"), previews: true, maxEdge: 2560)
         shotsDir = docs.appendingPathComponent("shots")
-        let s = Settings.load()
         settings = s
-        screen = s.login.complete ? .session : .connect
+        screen = s.login.complete ? .workspace : .connect
         library = Library(engine: engine, previews: previews)
         loupe = Loupe(engine: engine)
         editor = EditorModel(engine: engine, loupe: loupe, library: library)
+        if UserDefaults.standard.string(forKey: "screen") == "browser" { screen = .browser }
         wire()
         Task { await boot() }
         if s.login.complete { connect() }
@@ -67,13 +68,25 @@ final class AppModel: ObservableObject {
             self.loupe.put(Pic(key: key, photo: Library.preview, revision: rev, boxW: w, boxH: h, image: image, draft: false))
         }
         library.onArrival = { [weak self] key in self?.arrived(key) }
+        library.onReady = { [weak self] key in
+            guard let self = self, key == self.current else { return }
+            self.editor.open(key)
+        }
         loupe.previewDue = { [weak self] in
             guard let t = self?.tether.transfer else { return false }
             return t.name.lowercased().hasSuffix(".arw") && (self?.library.shot(stem(t.name))?.stage ?? .arriving) == .arriving
         }
-        loupe.onPicture = { [weak self] p in self?.library.developed(p.key, photo: p.photo, p.image) }
+        loupe.onPicture = { [weak self] p in
+            self?.library.developed(p.key, photo: p.photo, p.image)
+            self?.editor.pictureShown(p)
+        }
         editor.onEdited = { [weak self] key in self?.library.edited(key) }
         editor.presetsChanged = { [weak self] in await self?.presetsChanged() }
+        editor.onIdle = { [weak self] in
+            guard let self = self, let k = self.pendingFollow else { return }
+            self.pendingFollow = nil
+            self.current = k
+        }
         tether.onEvent = { [weak self] e in
             guard let self = self else { return }
             if e.str("type") == "fingerprint" {
@@ -83,10 +96,6 @@ final class AppModel: ObservableObject {
             }
             self.loupe.pump()
         }
-        // the views follow the library and the link
-        library.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &bag)
-        tether.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &bag)
-        loupe.objectWillChange.sink { [weak self] in self?.objectWillChange.send() }.store(in: &bag)
     }
 
     private func boot() async {
@@ -95,8 +104,14 @@ final class AppModel: ObservableObject {
             try await previews.open()
             _ = try? await engine.exec("app.memoryBudget", ["mb": 1536])
             let list = try await engine.array("develop.controls")
-            controls = Controls.from(list)
+            editor.store.setControls(Controls.from(list))
             presets = try await presetsOf(engine)
+            profiles = ((try? await engine.array("profiles.list")) ?? []).map { Profile(id: $0.str("id"), name: $0.str("name"), group: $0.str("group")) }
+            if let g = try? await engine.object("app.gpu") {
+                let on = (g["enabled"] as? Bool) == true && (g["available"] as? Bool) == true
+                renderer = on ? "GPU · \(g.str("adapter"))" : "CPU" + (g.str("reason").isEmpty ? "" : " (\(g.str("reason")))")
+                NSLog("lightcraft renderer: \(renderer)")
+            }
             await syncPreviews()
             await library.restore()
             ready = true
@@ -119,7 +134,7 @@ final class AppModel: ObservableObject {
         // another camera (or login): its key is seen afresh
         if settings.login.ssid != l.ssid || settings.login.user != l.user { l.fingerprint = "" } else { l.fingerprint = settings.login.fingerprint }
         settings.login = l
-        screen = .session
+        screen = .workspace
         connect()
     }
 
@@ -129,66 +144,68 @@ final class AppModel: ObservableObject {
     }
 
     private func arrived(_ key: String) {
-        // tests (`-autoEdit YES`): the editor opens on the first shot whose raw is in
-        if UserDefaults.standard.bool(forKey: "autoEdit"), screen == .session {
-            Task {
-                for _ in 0..<1200 {
-                    if let p = library.shot(key)?.photo, p != 0 { break }
-                    try? await Task.sleep(nanoseconds: 100_000_000)
-                }
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                if screen == .session { openEditor(key) }
-            }
+        if current == nil { current = key; return }
+        guard settings.followNewest, screen == .workspace else { return }
+        // a finger on a slider keeps the photo it is changing: the new shot comes when it lifts
+        if editor.busy {
+            pendingFollow = key
+            return
         }
-        guard settings.followNewest, screen == .session else { return }
         Task {
-            // go to it once its full picture is ready (rendered ahead as the next page), 2 s at most
+            // go to it once its full picture is ready (rendered ahead as the next one), 2 s at most
             for _ in 0..<40 {
                 if loupe.pics[key] != nil { break }
                 try? await Task.sleep(nanoseconds: 50_000_000)
             }
-            withAnimation(Motion.soft) { current = key }
+            if editor.busy { pendingFollow = key } else { current = key }
         }
     }
 
-    // ---- the editor
+    private func currentChanged() {
+        if let k = current { editor.open(k) } else { editor.close() }
+    }
 
-    func openEditor(_ key: String) {
-        guard let s = library.shot(key) else { return }
-        current = key
-        if s.photo == 0 {
-            pendingEdit = key
-            Task {
-                for _ in 0..<2400 {
-                    if pendingEdit != key { return }
-                    if let p = library.shot(key)?.photo, p != 0 { break }
-                    try? await Task.sleep(nanoseconds: 50_000_000)
-                }
-                if pendingEdit == key, screen == .session { pendingEdit = nil; openEditor(key) } else if pendingEdit == key { pendingEdit = nil }
-            }
-            return
-        }
-        pendingEdit = nil
-        loupe.show([])
-        editor.open(key)
-        withAnimation(Motion.soft) { screen = .editor }
+    func step(_ by: Int) {
+        let list = library.shots.filter { $0.stage != .failed }
+        guard let i = list.firstIndex(where: { $0.key == current }) else { return }
+        let j = i + by
+        if j >= 0 && j < list.count { current = list[j].key }
     }
 
     func go(_ s: Screen) {
-        if screen == .editor && s != .editor { editor.close() }
-        withAnimation(Motion.soft) { screen = s }
+        withAnimation(Motion.quick) { screen = s }
     }
 
     func say(_ text: String) {
         note = text
         noteTask?.cancel()
         noteTask = Task {
-            try? await Task.sleep(nanoseconds: 2_800_000_000)
+            try? await Task.sleep(nanoseconds: 2_600_000_000)
             if !Task.isCancelled { note = nil }
         }
     }
 
-    // ---- presets
+    // ---- rating, colour tags, flags
+
+    func rate(_ keys: Set<String>, _ n: Int) {
+        Task { await library.rate(keys, n) }
+    }
+
+    func tag(_ keys: Set<String>, _ label: ColorTag?) {
+        Task { await library.tag(keys, label) }
+    }
+
+    func flag(_ keys: Set<String>, _ f: String) {
+        Task { await library.flag(keys, f) }
+    }
+
+    /// The photos an action is for: the selection in the browser, else the one on screen.
+    var targets: Set<String> {
+        if screen == .browser && !selection.isEmpty { return selection }
+        return current.map { [$0] } ?? []
+    }
+
+    // ---- styles (presets)
 
     private func presetsOf(_ e: Engine) async throws -> [Preset] {
         let all = try await e.array("presets.list").map { Preset(id: $0.str("id"), name: $0.str("name"), group: $0.str("group"), builtin: ($0["builtin"] as? Bool) ?? false) }
@@ -215,6 +232,7 @@ final class AppModel: ObservableObject {
         await syncPreviews()
     }
 
+    /// Lightroom presets (XMP, .lrtemplate, zip, folders) and LightCraft's own.
     func importPresets(_ urls: [URL]) {
         Task {
             let dir = FileManager.default.temporaryDirectory.appendingPathComponent("preset-import")
@@ -231,11 +249,30 @@ final class AppModel: ObservableObject {
             do {
                 let r = try await engine.object("preset.import", ["paths": files])
                 let n = (r["imported"] as? [Any])?.count ?? 0
-                if n == 0 { say("Nessun preset trovato nei file"); return }
+                let fx = (r["effects"] as? [Any])?.count ?? 0
+                if n == 0 && fx == 0 { say("Nessuno stile trovato nei file"); return }
                 await presetsChanged()
-                say(n == 1 ? "1 preset importato" : "\(n) preset importati")
+                say(n == 1 ? "1 stile importato" : "\(n) stili importati")
             } catch {
                 say("Importazione non riuscita: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    /// Styles as Lightroom presets (XMP), to the share sheet.
+    func exportForLightroom(_ ids: [String]?) {
+        Task {
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("Lightroom presets")
+            try? FileManager.default.removeItem(at: dir)
+            var params: [String: Any] = ["dir": dir.path]
+            if let ids = ids { params["ids"] = ids }
+            do {
+                let r = try await engine.object("preset.exportXmp", params)
+                let urls = (r["paths"] as? [String] ?? []).map { URL(fileURLWithPath: $0) }
+                if urls.isEmpty { say("Nessuno stile da esportare"); return }
+                Share.present(urls)
+            } catch {
+                say(error.localizedDescription)
             }
         }
     }
@@ -253,83 +290,93 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// The preset every new shot gets ("" = none); `alsoTo`: the shot on screen gets it now too.
-    func setTetherPreset(_ id: String, amount: Int, alsoTo key: String?) {
-        settings.preset = id
-        settings.presetAmount = amount
-        guard let key = key, let s = library.shot(key), s.photo != 0, !id.isEmpty else { return }
+    /// The style the browser's selection gets.
+    func applyStyle(_ id: String, to keys: Set<String>) {
+        let ids = library.shots.filter { keys.contains($0.key) && $0.photo != 0 }.map(\.photo)
+        guard !ids.isEmpty else { return }
         Task {
             await library.editLock.lock()
-            _ = try? await engine.exec("preset.apply", ["id": id, "amount": amount, "ids": [s.photo]])
+            _ = try? await engine.exec("preset.apply", ["id": id, "amount": 100, "ids": ids])
             await library.editLock.unlock()
-            library.edited(key)
+            for k in keys { library.edited(k) }
+            if let c = current, keys.contains(c) { editor.open(c) }
         }
     }
 
-    /// Thumbnails of a photo with each preset (the tether preset sheet).
-    func loadVariants(photo: Int64) {
-        variantsTask?.cancel()
-        variants = [:]
-        guard photo != 0 else { return }
-        let ids = presets.map(\.id)
-        variantsTask = Task {
-            for id in [""] + ids {
-                if Task.isCancelled { break }
-                if let r = try? await engine.variant(photo, preset: id) { variants[id] = r.image }
-            }
+    /// The copied adjustments onto the browser's selection.
+    func paste(to keys: Set<String>) {
+        let ids = library.shots.filter { keys.contains($0.key) && $0.photo != 0 }.map(\.photo)
+        guard !ids.isEmpty else { return }
+        Task {
+            await library.editLock.lock()
+            _ = try? await engine.exec("develop.paste", ["ids": ids])
+            await library.editLock.unlock()
+            for k in keys { library.edited(k) }
+            say(ids.count == 1 ? "Regolazioni applicate" : "Regolazioni applicate a \(ids.count) foto")
         }
     }
 
-    // ---- selection, export, delete
+    // ---- export, delete
 
     func toggle(_ key: String) {
         if selection.contains(key) { selection.remove(key) } else { selection.insert(key) }
     }
 
-    /// The selected shots to the Photos library as JPEGs, with their edits.
-    func exportSelected(quality: Int, edge: Int) {
-        let list = library.shots.filter { selection.contains($0.key) && $0.photo != 0 }
+    /// The shots as JPEGs, with their edits: into Photos, or to the share sheet (Files, AirDrop…).
+    func exportShots(_ keys: Set<String>, quality: Int, edge: Int, toPhotos: Bool) {
+        let list = library.shots.filter { keys.contains($0.key) && $0.photo != 0 }
         guard !list.isEmpty, export?.finished != false else { return }
         settings.exportQuality = quality
         settings.exportEdge = edge
         export = ExportState(total: list.count)
         Task {
-            let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            guard status == .authorized || status == .limited else {
-                export = ExportState(total: list.count, done: list.count, saved: 0, finished: true)
-                say("Consenti l'accesso a Foto nelle Impostazioni dell'iPad")
-                return
+            if toPhotos {
+                let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+                guard status == .authorized || status == .limited else {
+                    export = ExportState(total: list.count, done: list.count, saved: 0, finished: true)
+                    say("Consenti l'accesso a Foto nelle Impostazioni dell'iPad")
+                    return
+                }
             }
-            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("export")
+            let tmp = FileManager.default.temporaryDirectory.appendingPathComponent("export-\(Int(Date().timeIntervalSince1970))")
             try? FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
             var saved = 0
+            var files: [URL] = []
             for (i, s) in list.enumerated() {
                 export?.done = i
                 let url = tmp.appendingPathComponent("\(s.key).jpg")
                 do {
                     try await engine.exportJpeg(s.photo, to: url, quality: quality, longEdge: edge)
-                    try await PHPhotoLibrary.shared().performChanges {
-                        let req = PHAssetCreationRequest.forAsset()
-                        let opts = PHAssetResourceCreationOptions()
-                        opts.originalFilename = "\(s.key).jpg"
-                        req.addResource(with: .photo, fileURL: url, options: opts)
+                    if toPhotos {
+                        try await PHPhotoLibrary.shared().performChanges {
+                            let req = PHAssetCreationRequest.forAsset()
+                            let opts = PHAssetResourceCreationOptions()
+                            opts.originalFilename = "\(s.key).jpg"
+                            req.addResource(with: .photo, fileURL: url, options: opts)
+                        }
+                        try? FileManager.default.removeItem(at: url)
+                    } else {
+                        files.append(url)
                     }
                     saved += 1
                 } catch {
                     NSLog("lightcraft export \(s.key): \(error)")
                 }
-                try? FileManager.default.removeItem(at: url)
             }
             export = ExportState(total: list.count, done: list.count, saved: saved, finished: true)
+            if !toPhotos && !files.isEmpty { Share.present(files) }
         }
     }
 
-    func deleteSelected() {
-        let keys = selection
+    func delete(_ keys: Set<String>) {
         Task {
             keys.forEach { loupe.forget($0) }
+            if let c = current, keys.contains(c) {
+                let rest = library.shots.filter { !keys.contains($0.key) && $0.stage != .failed }
+                current = rest.last?.key
+            }
             await library.remove(keys)
-            selection = []
+            selection.subtract(keys)
         }
     }
 }

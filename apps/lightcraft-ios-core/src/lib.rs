@@ -85,7 +85,9 @@ pub unsafe extern "C" fn lc_open(dir: *const c_char, nice: i32, previews: bool) 
     // SAFETY: as documented.
     let dir = unsafe { text(dir) };
     // An app has no settings folder of its own and a read-only temporary folder: both go next to
-    // the library. Rendering stays on the CPU (fast on an M1, and no GPU set-up at start-up).
+    // the library. Rendering runs on the GPU through Metal (the engine falls back to the CPU by
+    // itself when there is none, as in a simulator without one); the app sets LIGHTCRAFT_GPU=0 to
+    // keep it on the CPU.
     if let Some(parent) = std::path::Path::new(&dir).parent() {
         for (var, sub) in [("LIGHTCRAFT_CONFIG_DIR", "config"), ("TMPDIR", "tmp")] {
             if std::env::var_os(var).is_none() {
@@ -96,9 +98,9 @@ pub unsafe extern "C" fn lc_open(dir: *const c_char, nice: i32, previews: bool) 
             }
         }
     }
-    if std::env::var_os("LIGHTCRAFT_GPU").is_none() {
+    if std::env::var_os("LIGHTCRAFT_GPU_BACKEND").is_none() {
         // SAFETY: as above.
-        unsafe { std::env::set_var("LIGHTCRAFT_GPU", "0") };
+        unsafe { std::env::set_var("LIGHTCRAFT_GPU_BACKEND", "metal") };
     }
     match catch_unwind(|| Core::open(&dir, nice, previews)) {
         Ok(Ok(c)) => Box::into_raw(Box::new(Mutex::new(c))) as *mut c_void,

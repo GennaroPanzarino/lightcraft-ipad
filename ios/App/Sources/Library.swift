@@ -26,6 +26,12 @@ struct Shot: Identifiable {
     var aspect: Double = 1.5
     /// Bumped when its look changes (edits, preset, the raw replacing the preview).
     var revision = 0
+    /// Capture One's rating (0…5), colour tag and pick / reject flag.
+    var rating = 0
+    var label: ColorTag?
+    var flag = "none"
+    /// When it was taken (ISO 8601, for sorting).
+    var captured = ""
     var id: String { key }
 }
 
@@ -68,7 +74,7 @@ func scaled(_ image: CGImage, edge: Int) -> CGImage {
 }
 
 /// The session's shots in LightCraft's library: the camera's JPEG of each one developed at once (by a
-/// second LightCraft, with the tether preset), then the raw imported in its place.
+/// second LightCraft, with the next-capture style), then the raw imported in its place.
 @MainActor
 final class Library: ObservableObject {
     @Published private(set) var shots: [Shot] = []
@@ -80,14 +86,16 @@ final class Library: ObservableObject {
     var previewPresetIds: [String: String] = [:]
     /// The size the viewer shows a shot at (pixels).
     var screen = (w: 2560, h: 2560)
-    /// A preview developed with the tether preset (the viewer shows it until the raw is ready).
+    /// A preview developed with the next-capture style (the viewer shows it until the raw is ready).
     var onPreviewPicture: ((String, CGImage) -> Void)?
     /// A shot got its first picture (the viewer may go to it).
     var onArrival: ((String) -> Void)?
+    /// A shot's raw is in (the editor may open it).
+    var onReady: ((String) -> Void)?
     private var restoring = false
     private var previewChain: Task<Void, Never>?
     private var importChain: Task<Void, Never>?
-    static let thumbEdge = 320
+    static let thumbEdge = 360
     static let preview: Int64 = -1
 
     init(engine: Engine, previews: Engine) {
@@ -109,10 +117,11 @@ final class Library: ObservableObject {
         let key = stem(name)
         switch e.str("type") {
         case "started":
-            if shot(key) == nil { shots.append(Shot(key: key, name: name)) }
+            if shot(key) == nil { shots.append(Shot(key: key, name: name, captured: ISO8601DateFormatter().string(from: Date()))) }
         case "progress":
             let size = double(e["size"])
-            edit(key) { $0.progress = size > 0 ? double(e["got"]) / size : 0 }
+            let got = double(e["got"])
+            edit(key) { $0.progress = size > 0 ? got / size : 0 }
         case "preview":
             let url = URL(fileURLWithPath: e.str("path"))
             let prev = previewChain
@@ -138,7 +147,7 @@ final class Library: ObservableObject {
         throw EngineError(message: "\(url.lastPathComponent) non importato")
     }
 
-    /// The tether preset (if any) on `photo`.
+    /// The next-capture style (if any) on `photo`.
     private func look(_ photo: Int64, on e: Engine) async {
         let s = settings()
         guard !s.preset.isEmpty else { return }
@@ -167,8 +176,18 @@ final class Library: ObservableObject {
     private func importWhole(_ key: String, _ url: URL) async {
         await editLock.lock()
         do {
+            // the shot before it (for "copy from the last capture")
+            let previous = shots.last { $0.key != key && $0.photo != 0 }?.photo
             let id = try await importFile(url, into: engine)
-            await look(id, on: engine)
+            if settings().copyLast, let prev = previous {
+                _ = try? await engine.batch { e in
+                    _ = try e.execNow("library.select", ["ids": [prev], "active": prev])
+                    _ = try e.execNow("develop.copy")
+                    _ = try e.execNow("develop.paste", ["ids": [id]])
+                }
+            } else {
+                await look(id, on: engine)
+            }
             let isJpeg = ["jpg", "jpeg"].contains(url.pathExtension.lowercased())
             if shot(key) == nil { shots.append(Shot(key: key, name: url.lastPathComponent)) }
             let hadThumb = shot(key)?.thumb != nil
@@ -182,6 +201,7 @@ final class Library: ObservableObject {
             await editLock.unlock()
             // a raw keeps its preview's thumbnail until the viewer develops it, which gives the new one
             if !hadThumb || isJpeg { await thumb(key) }
+            onReady?(key)
         } catch {
             await editLock.unlock()
             NSLog("lightcraft: \(key): \(error)")
@@ -217,6 +237,30 @@ final class Library: ObservableObject {
     /// The photo was edited: its look changed.
     func edited(_ key: String) { edit(key) { $0.revision += 1 } }
 
+    // ---- rating, colour tag, flag (Capture One's)
+
+    func rate(_ keys: Set<String>, _ n: Int) async {
+        let ids = photos(keys)
+        guard !ids.isEmpty, (try? await engine.exec("photo.rate", ["rating": n, "ids": ids])) != nil else { return }
+        for k in keys { edit(k) { $0.rating = n } }
+    }
+
+    func tag(_ keys: Set<String>, _ label: ColorTag?) async {
+        let ids = photos(keys)
+        guard !ids.isEmpty, (try? await engine.exec("photo.label", ["label": label?.rawValue ?? "none", "ids": ids])) != nil else { return }
+        for k in keys { edit(k) { $0.label = label } }
+    }
+
+    func flag(_ keys: Set<String>, _ flag: String) async {
+        let ids = photos(keys)
+        guard !ids.isEmpty, (try? await engine.exec("photo.flag", ["flag": flag, "ids": ids])) != nil else { return }
+        for k in keys { edit(k) { $0.flag = flag } }
+    }
+
+    private func photos(_ keys: Set<String>) -> [Int64] {
+        shots.filter { keys.contains($0.key) && $0.photo != 0 }.map(\.photo)
+    }
+
     /// The shots already in the library (a session goes on after a restart).
     func restore() async {
         restoring = true
@@ -229,16 +273,21 @@ final class Library: ObservableObject {
             if byKey[key] == nil { order.append(key) }
             if byKey[key] == nil || p.str("kind") == "raw" { byKey[key] = p }
         }
-        shots = order.compactMap { key in
+        shots = order.compactMap { key -> Shot? in
             guard let p = byKey[key] else { return nil }
             let w = double(p["width"]), h = double(p["height"])
-            return Shot(key: key, name: p.str("fileName"), photo: int64(p["id"]), stage: .ready, progress: 1, aspect: h > 0 ? w / h : 1.5)
+            var s = Shot(key: key, name: p.str("fileName"), photo: int64(p["id"]), stage: .ready, progress: 1, aspect: h > 0 ? w / h : 1.5)
+            s.rating = Int(int64(p["rating"]))
+            s.label = ColorTag(rawValue: p.str("label").lowercased())
+            s.flag = p.str("flag").isEmpty ? "none" : p.str("flag")
+            s.captured = p.str("captured")
+            return s
         }
         for s in shots { await thumb(s.key) }
     }
 
     func remove(_ keys: Set<String>) async {
-        let ids = shots.filter { keys.contains($0.key) && $0.photo != 0 }.map(\.photo)
+        let ids = photos(keys)
         if !ids.isEmpty { _ = try? await engine.exec("photo.deletePermanently", ["ids": ids]) }
         shots.removeAll { keys.contains($0.key) }
     }

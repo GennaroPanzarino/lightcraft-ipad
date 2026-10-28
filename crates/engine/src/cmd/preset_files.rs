@@ -111,6 +111,45 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     Ok(json!({"path": path.display().to_string(), "count": chosen.len()}))
 }
 
+/// Presets as Lightroom / Camera Raw XMP presets, one file each, in `dir`.
+fn export_xmp(s: &mut Session, p: &Value) -> Result<Value> {
+    let c = "preset.exportXmp";
+    let dir = str_param(p, "dir").filter(|x| !x.trim().is_empty()).ok_or_else(|| bad(c, "missing dir"))?;
+    let ids = strings(p, "ids");
+    let group = str_param(p, "group");
+    let chosen: Vec<_> = s
+        .presets
+        .iter()
+        .filter(|x| match (&ids, group) {
+            (Some(ids), _) => ids.contains(&x.id),
+            (None, Some(g)) => x.group == g,
+            (None, None) => !x.builtin,
+        })
+        .cloned()
+        .collect();
+    if chosen.is_empty() {
+        return Err(bad(c, "no presets to export (create one first, or pass ids/group)"));
+    }
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).map_err(|e| bad(c, e.to_string()))?;
+    let mut paths: Vec<String> = Vec::new();
+    for preset in &chosen {
+        let name = crate::crs_write::file_name(preset);
+        // two presets of the same name: the second gets a number
+        let mut path = dir.join(&name);
+        let mut n = 2;
+        while paths.contains(&path.display().to_string()) {
+            path = dir.join(format!("{} {n}.xmp", name.trim_end_matches(".xmp")));
+            n += 1;
+        }
+        let target = path.to_string_lossy().to_string();
+        s.check_write_target(&target).map_err(|e| bad(c, e))?;
+        crate::export::write_file_durable(&target, crate::crs_write::preset_to_xmp(preset).as_bytes()).map_err(crate::EngineError::Other)?;
+        paths.push(path.display().to_string());
+    }
+    Ok(json!({"paths": paths, "count": chosen.len()}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         cmd!(
@@ -130,6 +169,15 @@ pub fn specs() -> Vec<CommandSpec> {
             "{path, ids?: [presetId], group?: name} (default: all user presets) → {path, count}; writes a .lcpreset JSON file",
             always,
             export
+        ),
+        cmd!(
+            "preset.exportXmp",
+            "Export Presets for Lightroom",
+            [],
+            None,
+            "{dir, ids?: [presetId], group?: name} (default: all user presets) → {paths, count}; one Lightroom / Camera Raw XMP preset per preset (crs: fields, the inverse of the import mapping in docs/xmp-interop.md; profiles, masks and spots stay out)",
+            always,
+            export_xmp
         ),
     ]
 }

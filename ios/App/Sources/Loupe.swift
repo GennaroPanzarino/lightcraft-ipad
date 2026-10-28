@@ -13,10 +13,11 @@ struct Pic {
 }
 
 /// The viewer's pictures: the shot on screen rendered for the screen (its neighbours after it), the
-/// last few kept so going back is instant. A shot whose look changed keeps its last picture until the
-/// new one is there: the raw takes the place of its preview without a flicker.
+/// last few kept so going back is instant. A shot whose look changed keeps its last picture until
+/// the new one is there: the raw takes the place of its preview without a flicker. Pictures go to the
+/// viewer directly (no SwiftUI on the way): a slider drag redraws the photo and nothing else.
 @MainActor
-final class Loupe: ObservableObject {
+final class Loupe {
     struct Want: Equatable {
         let key: String
         let photo: Int64
@@ -25,7 +26,7 @@ final class Loupe: ObservableObject {
         let h: Int
     }
 
-    @Published private(set) var pics: [String: Pic] = [:]
+    private(set) var pics: [String: Pic] = [:]
     private let engine: Engine
     private var wants: [Want] = []
     private var failed = Set<String>()
@@ -35,6 +36,11 @@ final class Loupe: ObservableObject {
     var previewDue: () -> Bool = { false }
     /// A finished picture (its thumbnail is cut from it).
     var onPicture: ((Pic) -> Void)?
+    /// The shot the viewer shows, and where its pictures go.
+    var viewerKey: String?
+    var onViewer: ((Pic) -> Void)?
+    /// The shot the editor is changing: its pictures come from the editor until it is done.
+    var held: String?
     static let keep = 6
 
     init(engine: Engine) { self.engine = engine }
@@ -49,6 +55,7 @@ final class Loupe: ObservableObject {
         order.removeAll { $0 == p.key }
         order.append(p.key)
         while order.count > Loupe.keep { pics[order.removeFirst()] = nil }
+        if p.key == viewerKey { onViewer?(p) }
         if !p.draft { onPicture?(p) }
     }
 
@@ -62,10 +69,10 @@ final class Loupe: ObservableObject {
         return have.photo == w.photo && have.revision == w.revision && !have.draft && have.boxW >= w.w && have.boxH >= w.h
     }
 
-    /// A picture that only improves on one already shown (the raw after its preview) is for the shot on
-    /// screen, and waits while the next shot's preview is coming.
+    /// A picture that only improves on one already shown (the raw after its preview) is for the shot
+    /// on screen, and waits while the next shot's preview is coming.
     private func wanted(_ i: Int, _ w: Want) -> Bool {
-        if satisfied(w) { return false }
+        if w.key == held || satisfied(w) { return false }
         let shown = pics[w.key] != nil
         return !(shown && (previewDue() || i > 0))
     }

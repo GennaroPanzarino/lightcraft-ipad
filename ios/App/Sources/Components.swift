@@ -1,101 +1,201 @@
 import SwiftUI
+import UIKit
 
-/// Pressing something shrinks it a little: touch feels physical.
+/// A pressed control darkens a little, at once: no bounce.
 struct PressStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .scaleEffect(configuration.isPressed ? 0.95 : 1)
-            .animation(Motion.snappy, value: configuration.isPressed)
+            .opacity(configuration.isPressed ? 0.6 : 1)
     }
 }
 
-struct PrimaryButton: View {
-    let title: String
-    var icon: String?
-    var enabled = true
-    var busy = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            ZStack {
-                if busy {
-                    ProgressView().tint(Lc.ink)
-                } else {
-                    HStack(spacing: 8) {
-                        if let icon = icon { Image(systemName: icon).font(.system(size: 17, weight: .semibold)) }
-                        Text(title).font(Typo.headline)
-                    }
-                    .foregroundColor(Lc.ink)
-                }
-            }
-            .frame(maxWidth: .infinity, minHeight: 56)
-            .background(Lc.amberGradient)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .opacity(enabled ? 1 : 0.4)
-        }
-        .buttonStyle(PressStyle())
-        .disabled(!enabled || busy)
-    }
-}
-
-struct SecondaryButton: View {
-    let title: String
-    var icon: String?
-    var tint: Color = Lc.text
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 8) {
-                if let icon = icon { Image(systemName: icon) }
-                Text(title).font(Typo.label)
-            }
-            .foregroundColor(tint)
-            .frame(maxWidth: .infinity, minHeight: 48)
-            .background(Lc.raised)
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(Lc.hairline))
-            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        }
-        .buttonStyle(PressStyle())
-    }
-}
-
-/// A round glass button for the viewer's chrome.
-struct GlassIcon: View {
+/// A toolbar icon (Capture One's cursor tools and commands).
+struct ToolIcon: View {
     let icon: String
     var active = false
-    var size: CGFloat = 46
+    var enabled = true
+    var size: CGFloat = 34
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: size * 0.38, weight: .medium))
-                .foregroundColor(active ? Lc.ink : Lc.text)
+                .font(.system(size: 15, weight: .regular))
+                .foregroundColor(active ? Lc.accent : (enabled ? Lc.text : Lc.text3.opacity(0.6)))
                 .frame(width: size, height: size)
-                .background(active ? AnyShapeStyle(Lc.amber) : AnyShapeStyle(Material.ultraThinMaterial))
-                .clipShape(Circle())
-                .overlay(Circle().stroke(Lc.hairline))
+                .background(active ? Lc.pressed : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                .contentShape(Rectangle())
         }
         .buttonStyle(PressStyle())
+        .disabled(!enabled)
     }
 }
 
-struct Pill<Content: View>: View {
-    @ViewBuilder let content: Content
+/// A flat button with a title (Capture One's grey push buttons).
+struct FlatButton: View {
+    let title: String
+    var icon: String?
+    var prominent = false
+    var enabled = true
+    let action: () -> Void
+
     var body: some View {
-        HStack(spacing: 8) { content }
-            .padding(.horizontal, 14)
-            .frame(height: 38)
-            .background(.ultraThinMaterial)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(Lc.hairline))
-            .environment(\.colorScheme, .dark)
+        Button(action: action) {
+            HStack(spacing: 6) {
+                if let icon = icon { Image(systemName: icon).font(.system(size: 12, weight: .medium)) }
+                Text(title).font(Typo.labelStrong).lineLimit(1)
+            }
+            .foregroundColor(prominent ? Color.black : Lc.text)
+            .padding(.horizontal, 12)
+            .frame(maxWidth: .infinity, minHeight: 30)
+            .background(prominent ? Lc.select : Lc.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Lc.hairline, lineWidth: 0.5))
+            .opacity(enabled ? 1 : 0.4)
+        }
+        .buttonStyle(PressStyle())
+        .disabled(!enabled)
     }
 }
 
-/// The link's state: a dot that breathes while it is looking, steady once connected.
+/// Two or more choices side by side (Capture One's tool tabs and modes).
+struct Segment: View {
+    let options: [String]
+    let selected: Int
+    let onSelect: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(Array(options.enumerated()), id: \.offset) { i, o in
+                Button { onSelect(i) } label: {
+                    Text(o).font(Typo.label)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.8)
+                        .foregroundColor(i == selected ? Lc.text : Lc.text2)
+                        .frame(maxWidth: .infinity, minHeight: 26)
+                        .background(i == selected ? Lc.pressed : Lc.field)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Lc.hairline, lineWidth: 0.5))
+    }
+}
+
+/// A switch on a row, the label on the left.
+struct ToggleRow: View {
+    let label: String
+    let on: Bool
+    var enabled = true
+    let onChange: (Bool) -> Void
+
+    var body: some View {
+        HStack {
+            Text(label).font(Typo.label).foregroundColor(Lc.text2)
+            Spacer()
+            Toggle("", isOn: Binding(get: { on }, set: { onChange($0) }))
+                .labelsHidden()
+                .toggleStyle(SwitchToggleStyle(tint: Lc.accent))
+                .scaleEffect(0.75, anchor: .trailing)
+        }
+        .frame(height: 30)
+        .disabled(!enabled)
+        .opacity(enabled ? 1 : 0.4)
+    }
+}
+
+/// A menu that looks like a field: the choice on the left, a chevron on the right.
+struct MenuField<Items: View>: View {
+    let label: String
+    let value: String
+    @ViewBuilder let items: Items
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(label).font(Typo.label).foregroundColor(Lc.text2).frame(width: 92, alignment: .leading)
+            Menu {
+                items
+            } label: {
+                HStack {
+                    Text(value).font(Typo.label).foregroundColor(Lc.text).lineLimit(1)
+                    Spacer(minLength: 4)
+                    Image(systemName: "chevron.up.chevron.down").font(.system(size: 9, weight: .semibold)).foregroundColor(Lc.text3)
+                }
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(Lc.field)
+                .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 3, style: .continuous).stroke(Lc.hairline, lineWidth: 0.5))
+            }
+        }
+        .frame(height: 30)
+    }
+}
+
+/// Five stars: tap one to rate, the same one again to clear.
+struct StarRating: View {
+    let rating: Int
+    var size: CGFloat = 12
+    var spacing: CGFloat = 3
+    let onRate: (Int) -> Void
+
+    var body: some View {
+        HStack(spacing: spacing) {
+            ForEach(1...5, id: \.self) { n in
+                Image(systemName: n <= rating ? "star.fill" : "star")
+                    .font(.system(size: size, weight: .regular))
+                    .foregroundColor(n <= rating ? Lc.star : Lc.text3)
+                    .frame(width: size + 8, height: size + 10)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        Haptics.tick()
+                        onRate(n == rating ? 0 : n)
+                    }
+            }
+        }
+    }
+}
+
+/// Stars as a read-only line (thumbnails).
+struct Stars: View {
+    let rating: Int
+    var size: CGFloat = 7
+
+    var body: some View {
+        HStack(spacing: 1) {
+            ForEach(0..<rating, id: \.self) { _ in
+                Image(systemName: "star.fill").font(.system(size: size)).foregroundColor(Lc.star)
+            }
+        }
+    }
+}
+
+/// The colour tags: tap one to tag, the same again to clear.
+struct TagPicker: View {
+    let tag: ColorTag?
+    var size: CGFloat = 14
+    let onTag: (ColorTag?) -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(ColorTag.allCases) { t in
+                Circle().fill(t.color)
+                    .frame(width: size, height: size)
+                    .overlay(Circle().stroke(Color.white, lineWidth: tag == t ? 2 : 0))
+                    .frame(width: size + 10, height: size + 12)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        Haptics.tick()
+                        onTag(tag == t ? nil : t)
+                    }
+            }
+        }
+    }
+}
+
+/// The link's state: a dot that breathes while it looks, steady once connected.
 struct StatusDot: View {
     let color: Color
     let pulsing: Bool
@@ -104,13 +204,13 @@ struct StatusDot: View {
     var body: some View {
         ZStack {
             if pulsing {
-                Circle().fill(color.opacity(0.45)).frame(width: 10, height: 10)
-                    .scaleEffect(phase ? 2.4 : 1).opacity(phase ? 0 : 1)
+                Circle().fill(color.opacity(0.45)).frame(width: 8, height: 8)
+                    .scaleEffect(phase ? 2.2 : 1).opacity(phase ? 0 : 1)
                     .animation(.easeOut(duration: 1.4).repeatForever(autoreverses: false), value: phase)
             }
-            Circle().fill(color).frame(width: 7, height: 7)
+            Circle().fill(color).frame(width: 6, height: 6)
         }
-        .frame(width: 12, height: 12)
+        .frame(width: 10, height: 10)
         .onAppear { phase = true }
     }
 }
@@ -118,77 +218,18 @@ struct StatusDot: View {
 /// A ring that fills as a shot arrives.
 struct ProgressRing: View {
     let fraction: Double
-    var line: CGFloat = 2.5
+    var line: CGFloat = 2
     var body: some View {
         ZStack {
             Circle().stroke(Color.white.opacity(0.2), lineWidth: line)
             Circle().trim(from: 0, to: max(0.001, min(1, fraction)))
-                .stroke(Lc.amber, style: StrokeStyle(lineWidth: line, lineCap: .round))
+                .stroke(Color.white, style: StrokeStyle(lineWidth: line, lineCap: .round))
                 .rotationEffect(.degrees(-90))
-                .animation(Motion.soft, value: fraction)
         }
     }
 }
 
-/// Two or more choices with a highlight that slides between them.
-struct Segmented: View {
-    let options: [String]
-    let selected: Int
-    let onSelect: (Int) -> Void
-    @Namespace private var ns
-
-    var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(options.enumerated()), id: \.offset) { i, o in
-                Button {
-                    withAnimation(Motion.snappy) { onSelect(i) }
-                } label: {
-                    Text(o).font(Typo.label)
-                        .foregroundColor(i == selected ? Lc.text : Lc.text3)
-                        .frame(maxWidth: .infinity, minHeight: 34)
-                        .background {
-                            if i == selected {
-                                RoundedRectangle(cornerRadius: 11, style: .continuous).fill(Lc.raised)
-                                    .overlay(RoundedRectangle(cornerRadius: 11, style: .continuous).stroke(Lc.hairline2))
-                                    .matchedGeometryEffect(id: "seg", in: ns)
-                            }
-                        }
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(3)
-        .background(Lc.night)
-        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(Lc.hairline))
-    }
-}
-
-struct Chip: View {
-    let text: String
-    let on: Bool
-    var icon: String?
-    var accent = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 6) {
-                if let icon = icon { Image(systemName: icon).font(.system(size: 13, weight: .semibold)) }
-                Text(text).font(Typo.label)
-            }
-            .foregroundColor(on ? Lc.ink : (accent ? Lc.amber : Lc.text2))
-            .padding(.horizontal, 14)
-            .frame(height: 34)
-            .background(on ? Lc.text : Lc.raised)
-            .clipShape(Capsule())
-            .overlay(Capsule().stroke(on ? Color.clear : (accent ? Lc.amber.opacity(0.5) : Lc.hairline)))
-        }
-        .buttonStyle(PressStyle())
-    }
-}
-
-/// A text field in the app's style: label above, quiet box, amber when focused.
+/// A text field: label above, a quiet box.
 struct Field: View {
     let label: String
     @Binding var text: String
@@ -198,7 +239,7 @@ struct Field: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             Text(label.uppercased()).overline()
             HStack {
                 Group {
@@ -215,21 +256,20 @@ struct Field: View {
                 .disableAutocorrection(true)
                 if secret {
                     Button { shown.toggle() } label: {
-                        Image(systemName: shown ? "eye.slash" : "eye").foregroundColor(Lc.text3)
+                        Image(systemName: shown ? "eye.slash" : "eye").font(.system(size: 13)).foregroundColor(Lc.text3)
                     }
                 }
             }
-            .padding(.horizontal, 16)
-            .frame(height: 52)
-            .background(Lc.night)
-            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(focused ? Lc.amber.opacity(0.7) : Lc.hairline2))
-            .animation(Motion.snappy, value: focused)
+            .padding(.horizontal, 10)
+            .frame(height: 36)
+            .background(Lc.field)
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(focused ? Lc.accent.opacity(0.7) : Lc.hairline2, lineWidth: focused ? 1 : 0.5))
         }
     }
 }
 
-/// The app's mark: six blades around an opening, breathing slowly.
+/// The app's mark: six blades around an opening.
 struct ApertureLogo: View {
     var animated = true
 
@@ -239,17 +279,15 @@ struct ApertureLogo: View {
             Canvas { ctx, size in
                 let s = min(size.width, size.height)
                 let c = CGPoint(x: size.width / 2, y: size.height / 2)
-                ctx.fill(Path(ellipseIn: CGRect(x: c.x - s / 2, y: c.y - s / 2, width: s, height: s)), with: .linearGradient(Gradient(colors: [Color(hex: 0x26262C), Color(hex: 0x111114)]), startPoint: .zero, endPoint: CGPoint(x: s, y: s)))
-                ctx.stroke(Path(ellipseIn: CGRect(x: c.x - s / 2, y: c.y - s / 2, width: s, height: s)), with: .color(.white.opacity(0.12)), lineWidth: 1)
-                let open = animated ? 0.40 + 0.06 * sin(t * 1.2) : 0.4
-                let rot = animated ? t * 15 : 0
-                aperture(ctx, c, s * 0.33, CGFloat(open), CGFloat(rot), s * 0.032)
+                let open = animated ? 0.40 + 0.05 * sin(t * 1.1) : 0.4
+                let rot = animated ? t * 12 : 0
+                aperture(ctx, c, s * 0.46, CGFloat(open), CGFloat(rot), max(1, s * 0.035))
             }
         }
     }
 
     private func aperture(_ ctx: GraphicsContext, _ c: CGPoint, _ big: CGFloat, _ opening: CGFloat, _ rotation: CGFloat, _ stroke: CGFloat) {
-        ctx.stroke(Path(ellipseIn: CGRect(x: c.x - big, y: c.y - big, width: 2 * big, height: 2 * big)), with: .color(Lc.amber), lineWidth: stroke)
+        ctx.stroke(Path(ellipseIn: CGRect(x: c.x - big, y: c.y - big, width: 2 * big, height: 2 * big)), with: .color(Lc.text.opacity(0.85)), lineWidth: stroke)
         let small = big * opening
         let v: [CGPoint] = (0..<6).map { i in
             let a = (CGFloat(i) * 60 + rotation) * .pi / 180
@@ -268,14 +306,80 @@ struct ApertureLogo: View {
             path.move(to: p)
             path.addLine(to: CGPoint(x: p.x + u.x * t, y: p.y + u.y * t))
         }
-        ctx.stroke(path, with: .color(Lc.amber), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+        ctx.stroke(path, with: .color(Lc.accent), style: StrokeStyle(lineWidth: stroke, lineCap: .round))
     }
 }
 
+/// A short message at the bottom of the screen.
 struct Toast: View {
     let text: String
     var body: some View {
-        Pill { Text(text).font(Typo.label).foregroundColor(Lc.text) }
-            .transition(.move(edge: .bottom).combined(with: .opacity))
+        Text(text).font(Typo.labelStrong).foregroundColor(Lc.text)
+            .padding(.horizontal, 14)
+            .frame(height: 32)
+            .background(Lc.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(Lc.hairline2, lineWidth: 0.5))
+            .shadow(color: .black.opacity(0.4), radius: 10, y: 4)
+            .transition(.opacity)
+    }
+}
+
+/// The link to the camera in the toolbar: a dot, the camera, RAW / JPEG, the transfer.
+struct LinkStatus: View {
+    @ObservedObject var tether: TetherLink
+    let raw: Bool
+
+    var body: some View {
+        let (color, text, pulsing): (Color, String, Bool) = {
+            switch tether.link {
+            case .online(let m): return (Lc.live, m.isEmpty ? "Fotocamera" : m, false)
+            case .joining: return (Lc.warn, "Wi-Fi…", true)
+            case .searching: return (Lc.warn, "Ricerca", true)
+            case .connecting: return (Lc.warn, "Collegamento", true)
+            case .retrying: return (Lc.warn, "Ricollegamento", true)
+            case .blocked: return (Lc.danger, "Da controllare", false)
+            case .off: return (Lc.text3, "Scollegata", false)
+            }
+        }()
+        return HStack(spacing: 7) {
+            StatusDot(color: color, pulsing: pulsing)
+            Text(text).font(Typo.labelStrong).foregroundColor(Lc.text).lineLimit(1)
+            if case .online = tether.link {
+                Text(raw ? "RAW" : "JPEG").font(Typo.micro).foregroundColor(Lc.text2)
+                    .padding(.horizontal, 4).frame(height: 15)
+                    .overlay(RoundedRectangle(cornerRadius: 2).stroke(Lc.hairline2, lineWidth: 0.5))
+                if let t = tether.transfer {
+                    ProgressRing(fraction: t.fraction, line: 1.5).frame(width: 13, height: 13)
+                } else if tether.lastRate > 0 {
+                    Text(String(format: "%.0f MB/s", tether.lastRate)).font(Typo.caption).foregroundColor(Lc.text3)
+                }
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: 28)
+        .background(Lc.field)
+        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(Lc.hairline, lineWidth: 0.5))
+    }
+}
+
+/// The system's share sheet (Files, AirDrop, Lightroom…), over whatever is on screen (a sheet
+/// included); on the iPad it is a popover, in the middle of the screen.
+@MainActor
+enum Share {
+    static func present(_ urls: [URL]) {
+        guard let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first,
+              let root = scene.windows.first(where: \.isKeyWindow)?.rootViewController ?? scene.windows.first?.rootViewController
+        else { return }
+        var top = root
+        while let p = top.presentedViewController { top = p }
+        let vc = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        if let pop = vc.popoverPresentationController {
+            pop.sourceView = top.view
+            pop.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 1, height: 1)
+            pop.permittedArrowDirections = []
+        }
+        top.present(vc, animated: true)
     }
 }

@@ -1,5 +1,6 @@
 """The iPad app in the iOS Simulator (GitHub's macOS runner) against the stand-in camera: settings
-seeded, shots arriving, screenshots along the way, the app's log."""
+seeded, shots arriving, the workspace in landscape and portrait with each tool group, the browser,
+the app's log."""
 import json
 import os
 import subprocess
@@ -46,6 +47,7 @@ def shot(n):
 
 def launch(*args):
     sh("xcrun", "simctl", "terminate", udid, BUNDLE, check=False)
+    time.sleep(1)
     sh("xcrun", "simctl", "launch", udid, BUNDLE, *args)
 
 
@@ -54,7 +56,7 @@ launch()
 time.sleep(6)
 shot("01_connect")
 
-# 2. the test login (plain PTP to the stand-in camera on this Mac), Warm Film on every shot
+# 2. the test login (plain PTP to the stand-in camera on this Mac), a style on every shot
 settings = {
     "login": {"ssid": "", "wifiPassword": "", "user": "", "password": "", "fingerprint": "", "plain": "127.0.0.1:15740"},
     "raw": True, "preset": "lc.warm-film", "presetAmount": 100, "followNewest": True, "keepAwake": True,
@@ -62,18 +64,36 @@ settings = {
 }
 hexdata = json.dumps(settings).encode().hex()
 sh("xcrun", "simctl", "spawn", udid, "defaults", "write", BUNDLE, "settings", "-data", hexdata)
-env = dict(os.environ, FAKE_RATE="20000000", FAKE_EVERY="14")
+env = dict(os.environ, FAKE_RATE="20000000", FAKE_EVERY="12")
 cam = subprocess.Popen([sys.executable, "tools/fake_ptp_camera.py", *RAWS], stdout=open(os.path.join(OUT, "camera.log"), "w"), stderr=subprocess.STDOUT, env=env)
 time.sleep(1)
 t0 = time.time()
-launch("-autoEdit", "YES", "-tool", os.environ.get("TOOL", "light"))
-for t in [3, 6, 9, 13, 18, 24, 32, 40, 50]:
+launch("-landscape", "YES", "-tool", "exposure")
+for t in [4, 9, 14, 20, 28, 36]:
     while time.time() - t0 < t:
         time.sleep(0.2)
-    shot(f"02_t{t:02d}")
+    shot(f"02_live_t{t:02d}")
 cam.terminate()
-log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "4m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
+
+# 3. each tool group, the browser, portrait
+for tool in ["color", "details", "adjustments", "lens", "metadata", "capture"]:
+    launch("-landscape", "YES", "-tool", tool)
+    time.sleep(9)
+    shot(f"03_{tool}")
+launch("-landscape", "YES", "-screen", "browser")
+time.sleep(8)
+shot("04_browser")
+launch("-tool", "exposure")
+time.sleep(9)
+shot("05_portrait")
+launch("-screen", "browser")
+time.sleep(7)
+shot("06_portrait_browser")
+
+log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "8m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
 open(os.path.join(OUT, "app.log"), "w").write(log)
 crashes = sh("bash", "-c", "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i lightcraft || true").stdout
 print("crash reports:", crashes or "none")
-print(log[-4000:])
+for line in log.splitlines():
+    if "lightcraft" in line.lower() and ("renderer" in line or "editor" in line or "error" in line.lower()):
+        print(line[:300])

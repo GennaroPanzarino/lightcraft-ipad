@@ -18,13 +18,42 @@ struct CameraLogin: Codable, Equatable {
 struct Settings: Codable, Equatable {
     var login = CameraLogin()
     var raw = true
-    /// The preset every new shot gets ("" = none).
+    /// The style every new shot gets ("" = none): Capture One's next capture adjustments.
     var preset = ""
     var presetAmount = 100
+    /// Next captures get the last capture's adjustments instead of the style.
+    var copyLast = false
     var followNewest = true
     var keepAwake = true
     var exportQuality = 92
     var exportEdge = 0
+    /// The tools on the left (Capture One's default) or on the right.
+    var toolsLeft = true
+    /// Rendering on the GPU (Metal); off: the CPU.
+    var gpu = true
+    /// The browser's thumbnail size (points).
+    var gridSize = 180.0
+
+    init() {}
+
+    /// Settings saved by an earlier version lack the newer fields: they keep their defaults (the
+    /// camera's login is never lost to an update).
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = Settings()
+        login = try c.decodeIfPresent(CameraLogin.self, forKey: .login) ?? d.login
+        raw = try c.decodeIfPresent(Bool.self, forKey: .raw) ?? d.raw
+        preset = try c.decodeIfPresent(String.self, forKey: .preset) ?? d.preset
+        presetAmount = try c.decodeIfPresent(Int.self, forKey: .presetAmount) ?? d.presetAmount
+        copyLast = try c.decodeIfPresent(Bool.self, forKey: .copyLast) ?? d.copyLast
+        followNewest = try c.decodeIfPresent(Bool.self, forKey: .followNewest) ?? d.followNewest
+        keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? d.keepAwake
+        exportQuality = try c.decodeIfPresent(Int.self, forKey: .exportQuality) ?? d.exportQuality
+        exportEdge = try c.decodeIfPresent(Int.self, forKey: .exportEdge) ?? d.exportEdge
+        toolsLeft = try c.decodeIfPresent(Bool.self, forKey: .toolsLeft) ?? d.toolsLeft
+        gpu = try c.decodeIfPresent(Bool.self, forKey: .gpu) ?? d.gpu
+        gridSize = try c.decodeIfPresent(Double.self, forKey: .gridSize) ?? d.gridSize
+    }
 
     static func load() -> Settings {
         guard let d = UserDefaults.standard.data(forKey: "settings"), let s = try? JSONDecoder().decode(Settings.self, from: d) else { return Settings() }
