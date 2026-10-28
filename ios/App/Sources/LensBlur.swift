@@ -211,9 +211,9 @@ enum LensBlurRenderer {
         // a soft edge between sharp and blurred, made at the depth map's size (cheap), then
         // stretched to the picture's
         let k = size.width / CGFloat(max(1, d.width))
-        let soft = CIImage(cgImage: g).clampedToExtent().applyingGaussianBlur(sigma: Double(reference) * 0.003 / Double(max(k, 0.01)))
+        let softened = CIImage(cgImage: g).clampedToExtent().applyingGaussianBlur(sigma: Double(reference) * 0.003 / Double(max(k, 0.01)))
         let t = CGAffineTransform(scaleX: k, y: size.height / CGFloat(max(1, d.height)))
-        return soft.transformed(by: t).cropped(to: CGRect(origin: .zero, size: size))
+        return softened.transformed(by: t).cropped(to: CGRect(origin: .zero, size: size))
     }
 
     /// `input` disc-blurred by `radius` pixels, worked at a fraction of its size (a blur hides the
