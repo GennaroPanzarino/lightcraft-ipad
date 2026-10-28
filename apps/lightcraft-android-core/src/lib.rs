@@ -76,6 +76,11 @@ impl Core {
     /// One command: `{"ok": true, "result": …}` or `{"ok": false, "error": …}`.
     pub fn execute(&mut self, command: &str, params: &str) -> Value {
         let p: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).unwrap_or(json!({})) };
+        // memory is short (the app shrinks the budget): the zoomed photo's original goes too
+        if command == "app.memoryBudget" && p.get("mb").and_then(Value::as_f64).is_some_and(|mb| mb < 200.0) {
+            self.session.media.set_on_screen(None);
+            self.zoom = None;
+        }
         match self.session.execute(command, &p) {
             Ok(r) => json!({"ok": true, "result": r}),
             Err(e) => json!({"ok": false, "error": e.to_string()}),
@@ -177,6 +182,9 @@ impl Core {
                 s
             }
         };
+        // the zoomed photo's original stays decoded however tight the budget (else every pan of
+        // the zoomed view decoded the raw again: 1.5–2 s each)
+        self.session.media.set_on_screen(Some(photo));
         let job = self.session.region_job(photo, fw, fh, window, true).ok_or("region not available")?.with_stages(stages);
         let mut r = self.run_into(job, out, t0)?;
         r["window"] = json!([x, y, w, h]);
@@ -498,6 +506,8 @@ mod tests {
         let mut buf = vec![0u8; 3200 * 3200 * 4];
         let v = c.render(id, 2388, 1668, false, &mut buf).unwrap();
         eprintln!("screen render {}", v["ms"]);
+        // a tight budget (less than the original alone, as on an iPad short of memory)
+        let _ = c.execute("app.memoryBudget", &json!({"mb": 300}).to_string());
         for (i, (fw, fh, x, y, w, h)) in
             [(6000, 4000, 1200, 1200, 1800, 1200), (6000, 4000, 3600, 2000, 600, 400), (6000, 4000, 100, 100, 360, 240), (48000, 32000, 19200, 12800, 2400, 1600)].into_iter().enumerate()
         {
