@@ -4,30 +4,32 @@ import UniformTypeIdentifiers
 
 /// Capture One's tool tabs, here as the groups of one long scrolling column.
 enum ToolGroup: String, CaseIterable, Identifiable {
-    case capture, lens, composition, exposure, color, local, details, adjustments, metadata
+    case capture, exposure, color, composition, local, details, lens, retouch, adjustments, metadata
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .capture: return "Acquisizione"
-        case .lens: return "Obiettivo"
-        case .composition: return "Composizione"
-        case .exposure: return "Esposizione"
+        case .capture: return "Tethering"
+        case .exposure: return "Base"
         case .color: return "Colore"
+        case .composition: return "Composizione"
         case .local: return "Regolazioni locali"
         case .details: return "Dettagli"
-        case .adjustments: return "Regolazioni"
+        case .lens: return "Obiettivo"
+        case .retouch: return "Ritocco"
+        case .adjustments: return "Stili"
         case .metadata: return "Metadati"
         }
     }
     var icon: String {
         switch self {
         case .capture: return "camera"
-        case .lens: return "camera.aperture"
-        case .composition: return "crop"
         case .exposure: return "sun.max"
         case .color: return "paintpalette"
+        case .composition: return "crop"
         case .local: return "square.3.layers.3d"
         case .details: return "scope"
+        case .lens: return "camera.aperture"
+        case .retouch: return "bandage"
         case .adjustments: return "slider.horizontal.3"
         case .metadata: return "info.circle"
         }
@@ -37,14 +39,14 @@ enum ToolGroup: String, CaseIterable, Identifiable {
 /// Which tools are folded, and the group in view.
 @MainActor
 final class PanelState: ObservableObject {
-    @Published var active: ToolGroup = .exposure
+    @Published var active: ToolGroup = .capture
     @Published var collapsed: Set<String> {
         didSet { UserDefaults.standard.set(Array(collapsed), forKey: "collapsedTools") }
     }
 
     init() {
         let saved = UserDefaults.standard.stringArray(forKey: "collapsedTools")
-        collapsed = Set(saved ?? ["calibration", "fringe", "history", "keystone", "rotation", "dehaze"])
+        collapsed = Set(saved ?? ["calibration", "fringe", "history", "keystone", "rotation"])
     }
 
     func toggle(_ id: String) {
@@ -117,18 +119,53 @@ struct ToolPanel: View {
         let s = ed.store
         switch g {
         case .capture:
-            ToolBox(id: "camera", title: "Fotocamera", state: state) { CameraTool(tether: model.tether) }
-            ToolBox(id: "nextCapture", title: "Regolazioni prossimo scatto", state: state) { NextCaptureTool() }
-        case .lens:
-            ToolBox(id: "lens", title: "Correzione obiettivo", state: state, ed: ed, section: "optics") {
-                ToggleRow(label: "Profilo obiettivo", on: ed.lensProfile) { ed.merge(["optics": ["lens_profile": $0]], label: "Profilo obiettivo") }
-                Sliders(store: s, ids: ["optics.profileDistortion", "optics.profileVignetting"])
-                ToggleRow(label: "Aberrazione cromatica", on: ed.removeCA) { ed.merge(["optics": ["remove_ca": $0]], label: "Aberrazione cromatica") }
-                Sliders(store: s, ids: ["optics.distortion", "optics.vignetting", "optics.vignettingMidpoint"])
+            ToolBox(id: "tethering", title: "Tethering", state: state) {
+                CameraTool(tether: model.tether)
+                Rectangle().fill(Lc.hairline).frame(height: 0.5).padding(.vertical, 6)
+                Text("PROSSIMO SCATTO").overline().padding(.bottom, 2)
+                NextCaptureTool()
             }
-            ToolBox(id: "lensBlur", title: "Sfocatura obiettivo", state: state) { LensBlurTool(ed: ed) }
-            ToolBox(id: "fringe", title: "Frange colorate", state: state) {
-                Sliders(store: s, ids: ["optics.caRed", "optics.caBlue", "optics.defringePurple", "optics.defringePurpleHueLo", "optics.defringePurpleHueHi", "optics.defringeGreen", "optics.defringeGreenHueLo", "optics.defringeGreenHueHi"])
+        case .exposure:
+            ToolBox(id: "basic", title: "Base", state: state, ed: ed, resetIds: basicIds, accessory: AnyView(MiniButton(title: "Auto") { ed.run("develop.auto") })) {
+                BasicTool(ed: ed)
+            }
+            ToolBox(id: "curve", title: "Curva", state: state, ed: ed, section: "curve") { CurveTool(ed: ed) }
+            ToolBox(id: "vignette", title: "Vignettatura", state: state, ed: ed, section: "vignette") {
+                MenuField(label: "Metodo", value: vignetteName(ed.vignetteStyle)) {
+                    ForEach(["highlightPriority", "colorPriority", "paintOverlay"], id: \.self) { v in
+                        Button(vignetteName(v)) { ed.merge(["vignette": ["style": v]], label: "Vignettatura") }
+                    }
+                }
+                Sliders(store: s, ids: ["vignette.amount", "vignette.midpoint", "vignette.roundness", "vignette.feather", "vignette.highlights"])
+            }
+        case .color:
+            ToolBox(id: "profile", title: "Caratteristiche base", state: state, ed: ed, resetIds: ["profile.amount"]) {
+                MenuField(label: "Profilo", value: model.profiles.first { $0.id == ed.profile }?.name ?? "Predefinito") {
+                    ForEach(profileGroups(), id: \.self) { group in
+                        Menu(groupLabel(group)) {
+                            ForEach(model.profiles.filter { $0.group == group }) { p in
+                                Button(p.name) { ed.setProfile(p.id) }
+                            }
+                        }
+                    }
+                }
+                Sliders(store: s, ids: ["profile.amount"])
+                Segment(options: ["Colore", "Bianco e nero"], selected: ed.bw ? 1 : 0) { ed.setBw($0 == 1) }
+                    .padding(.vertical, 6)
+            }
+            ToolBox(id: "balance", title: "Bilanciamento colore", state: state, ed: ed, section: "grading") { ColorBalanceTool(store: s) }
+            ToolBox(id: "editor", title: "Editor colore", state: state, ed: ed, section: "mixer") { ColorEditorTool(store: s) }
+            ToolBox(id: "bw", title: "Bianco e nero", state: state, ed: ed, resetIds: Band.allCases.map { "bw.\($0.rawValue)" }) {
+                ToggleRow(label: "Abilita", on: ed.bw) { ed.setBw($0) }
+                HStack {
+                    Spacer()
+                    MiniButton(title: "Mix automatico") { ed.run("develop.autoBwMix") }
+                }
+                .padding(.bottom, 2)
+                Sliders(store: s, ids: Band.allCases.map { "bw.\($0.rawValue)" })
+            }
+            ToolBox(id: "calibration", title: "Calibrazione", state: state, ed: ed, resetIds: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"]) {
+                Sliders(store: s, ids: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"])
             }
         case .composition:
             ToolBox(id: "crop", title: "Ritaglio", state: state) { CropTool(ed: ed) }
@@ -149,82 +186,36 @@ struct ToolPanel: View {
                 }
                 Sliders(store: s, ids: ["geometry.vertical", "geometry.horizontal", "geometry.rotate", "geometry.aspect", "geometry.scale", "geometry.offsetX", "geometry.offsetY"])
             }
-        case .exposure:
-            ToolBox(id: "exposure", title: "Esposizione", state: state, ed: ed, resetIds: ["light.exposure", "light.contrast", "color.saturation", "color.vibrance"], accessory: AnyView(MiniButton(title: "Auto") { ed.run("develop.auto") })) {
-                Sliders(store: s, ids: ["light.exposure", "light.contrast", "color.saturation", "color.vibrance"])
-            }
-            ToolBox(id: "hdr", title: "High Dynamic Range", state: state, ed: ed, resetIds: ["light.highlights", "light.shadows", "light.whites", "light.blacks"]) {
-                Sliders(store: s, ids: ["light.highlights", "light.shadows", "light.whites", "light.blacks"])
-            }
-            ToolBox(id: "curve", title: "Curva", state: state, ed: ed, section: "curve") { CurveTool(ed: ed) }
-            ToolBox(id: "clarity", title: "Chiarezza", state: state, ed: ed, resetIds: ["effects.clarity", "effects.texture"]) {
-                Sliders(store: s, ids: ["effects.clarity", "effects.texture"])
-            }
-            ToolBox(id: "dehaze", title: "Dehaze", state: state, ed: ed, resetIds: ["effects.dehaze"]) {
-                Sliders(store: s, ids: ["effects.dehaze"])
-            }
-            ToolBox(id: "vignette", title: "Vignettatura", state: state, ed: ed, section: "vignette") {
-                MenuField(label: "Metodo", value: vignetteName(ed.vignetteStyle)) {
-                    ForEach(["highlightPriority", "colorPriority", "paintOverlay"], id: \.self) { v in
-                        Button(vignetteName(v)) { ed.merge(["vignette": ["style": v]], label: "Vignettatura") }
-                    }
-                }
-                Sliders(store: s, ids: ["vignette.amount", "vignette.midpoint", "vignette.roundness", "vignette.feather", "vignette.highlights"])
-            }
-        case .color:
-            ToolBox(id: "base", title: "Caratteristiche base", state: state, ed: ed, resetIds: ["profile.amount"]) {
-                MenuField(label: "Profilo", value: model.profiles.first { $0.id == ed.profile }?.name ?? "Predefinito") {
-                    ForEach(profileGroups(), id: \.self) { group in
-                        Menu(groupLabel(group)) {
-                            ForEach(model.profiles.filter { $0.group == group }) { p in
-                                Button(p.name) { ed.setProfile(p.id) }
-                            }
-                        }
-                    }
-                }
-                Sliders(store: s, ids: ["profile.amount"])
-                Segment(options: ["Colore", "Bianco e nero"], selected: ed.bw ? 1 : 0) { ed.setBw($0 == 1) }
-                    .padding(.vertical, 6)
-            }
-            ToolBox(id: "wb", title: "Bilanciamento del bianco", state: state, ed: ed, resetIds: []) { WhiteBalanceTool(ed: ed) }
-            ToolBox(id: "balance", title: "Bilanciamento colore", state: state, ed: ed, section: "grading") { ColorBalanceTool(store: s) }
-            ToolBox(id: "editor", title: "Editor colore", state: state, ed: ed, section: "mixer") { ColorEditorTool(store: s) }
-            ToolBox(id: "bw", title: "Bianco e nero", state: state, ed: ed, resetIds: Band.allCases.map { "bw.\($0.rawValue)" }) {
-                ToggleRow(label: "Abilita", on: ed.bw) { ed.setBw($0) }
-                HStack {
-                    Spacer()
-                    MiniButton(title: "Mix automatico") { ed.run("develop.autoBwMix") }
-                }
-                .padding(.bottom, 2)
-                Sliders(store: s, ids: Band.allCases.map { "bw.\($0.rawValue)" })
-            }
-            ToolBox(id: "calibration", title: "Calibrazione", state: state, ed: ed, resetIds: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"]) {
-                Sliders(store: s, ids: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"])
-            }
         case .local:
             ToolBox(id: "layers", title: "Livelli", state: state) { LayersTool(ed: ed) }
         case .details:
-            ToolBox(id: "spots", title: "Rimozione macchie", state: state) { SpotTool(ed: ed) }
             ToolBox(id: "sharpen", title: "Nitidezza", state: state, ed: ed, resetIds: ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"]) {
                 Sliders(store: s, ids: ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"])
-            }
-            ToolBox(id: "noise", title: "Riduzione rumore", state: state, ed: ed, resetIds: ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"]) {
-                Sliders(store: s, ids: ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"])
             }
             ToolBox(id: "grain", title: "Grana pellicola", state: state, ed: ed, section: "grain") {
                 Sliders(store: s, ids: ["grain.amount", "grain.size", "grain.roughness"])
             }
+            ToolBox(id: "noise", title: "Riduzione rumore", state: state, ed: ed, resetIds: ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"]) {
+                Sliders(store: s, ids: ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"])
+            }
+        case .lens:
+            ToolBox(id: "lens", title: "Correzione obiettivo", state: state, ed: ed, section: "optics") {
+                ToggleRow(label: "Profilo obiettivo", on: ed.lensProfile) { ed.merge(["optics": ["lens_profile": $0]], label: "Profilo obiettivo") }
+                if ed.lensProfile {
+                    Sliders(store: s, ids: ["optics.profileDistortion", "optics.profileVignetting"],
+                            labels: ["optics.profileDistortion": "Distors. profilo", "optics.profileVignetting": "Luce profilo"])
+                }
+                ToggleRow(label: "Aberrazione cromatica", on: ed.removeCA) { ed.merge(["optics": ["remove_ca": $0]], label: "Aberrazione cromatica") }
+                Sliders(store: s, ids: ["optics.distortion", "optics.vignetting", "optics.vignettingMidpoint"])
+            }
+            ToolBox(id: "lensBlur", title: "Sfocatura obiettivo", state: state) { LensBlurTool(ed: ed) }
+            ToolBox(id: "fringe", title: "Frange colorate", state: state) {
+                Sliders(store: s, ids: ["optics.caRed", "optics.caBlue", "optics.defringePurple", "optics.defringePurpleHueLo", "optics.defringePurpleHueHi", "optics.defringeGreen", "optics.defringeGreenHueLo", "optics.defringeGreenHueHi"])
+            }
+        case .retouch:
+            ToolBox(id: "spots", title: "Rimozione macchie", state: state) { SpotTool(ed: ed) }
         case .adjustments:
             ToolBox(id: "styles", title: "Stili e preset", state: state) { StylesTool(ed: ed) }
-            ToolBox(id: "copy", title: "Copia e applica", state: state) {
-                HStack(spacing: 6) {
-                    FlatButton(title: "Copia", icon: "doc.on.doc") { ed.copySettings(); model.say("Regolazioni copiate") }
-                    FlatButton(title: "Applica", icon: "doc.on.clipboard", enabled: ed.hasCopy) { ed.pasteSettings() }
-                }
-                .padding(.vertical, 4)
-                FlatButton(title: "Regolazioni automatiche", icon: "wand.and.stars") { ed.run("develop.auto") }
-                    .padding(.bottom, 4)
-            }
             ToolBox(id: "history", title: "Cronologia", state: state) { HistoryTool(ed: ed) }
         case .metadata:
             ToolBox(id: "rating", title: "Valutazione e tag", state: state) { RatingTool(library: model.library, key: ed.key) }
@@ -235,7 +226,7 @@ struct ToolPanel: View {
                     }
                     ForEach(ed.meta) { m in
                         HStack(alignment: .firstTextBaseline) {
-                            Text(m.name).font(Typo.label).foregroundColor(Lc.text3).frame(width: 92, alignment: .leading)
+                            Text(m.name).font(Typo.label).foregroundColor(Lc.text3).frame(width: 100, alignment: .leading)
                             Text(m.value).font(Typo.label).foregroundColor(Lc.text).lineLimit(2)
                             Spacer(minLength: 0)
                         }
@@ -243,7 +234,7 @@ struct ToolPanel: View {
                     }
                     if !model.renderer.isEmpty {
                         HStack(alignment: .firstTextBaseline) {
-                            Text("Motore").font(Typo.label).foregroundColor(Lc.text3).frame(width: 92, alignment: .leading)
+                            Text("Motore").font(Typo.label).foregroundColor(Lc.text3).frame(width: 100, alignment: .leading)
                             Text(model.renderer).font(Typo.label).foregroundColor(Lc.text2).lineLimit(2)
                             Spacer(minLength: 0)
                         }
@@ -623,6 +614,45 @@ private struct CurveBox: UIViewRepresentable {
 
 // MARK: - Colour
 
+/// The Base panel's sliders, in order: white balance, tone, presence.
+private let basicIds = [
+    "wb.temp", "wb.tint", "light.exposure", "light.contrast", "light.highlights", "light.shadows", "light.whites", "light.blacks",
+    "color.saturation", "color.vibrance", "effects.clarity", "effects.texture", "effects.dehaze",
+]
+
+/// White balance, exposure, tone, presence: one panel (Lightroom's Basic).
+private struct BasicTool: View {
+    @ObservedObject var ed: EditorModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 6) {
+                MenuField(label: "Modalità", value: whiteModes.first { $0.0 == ed.wbMode }?.1 ?? "Personalizzato") {
+                    ForEach(whiteModes, id: \.0) { m in
+                        Button(m.1) { ed.whiteBalance(m.0) }
+                    }
+                }
+                Button {
+                    ed.cursorTool = .none
+                    ed.picking.toggle()
+                } label: {
+                    Image(systemName: "eyedropper")
+                        .font(.system(size: 14))
+                        .foregroundColor(ed.picking ? Color.black : Lc.text)
+                        .frame(width: 34, height: 28)
+                        .background(ed.picking ? Lc.accent : Lc.raised)
+                        .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                }
+                .buttonStyle(PressStyle())
+            }
+            if ed.picking {
+                Text("Tocca un punto bianco o grigio neutro nella foto").font(Typo.caption).foregroundColor(Lc.accent).padding(.bottom, 4)
+            }
+            Sliders(store: ed.store, ids: basicIds, labels: ["wb.temp": "Temperatura", "effects.dehaze": "Dehaze"])
+        }
+    }
+}
+
 private let whiteModes: [(String, String)] = [
     ("asShot", "Come scattato"), ("auto", "Automatico"), ("daylight", "Luce diurna"), ("cloudy", "Nuvoloso"),
     ("shade", "Ombra"), ("tungsten", "Tungsteno"), ("fluorescent", "Fluorescente"), ("flash", "Flash"),
@@ -779,6 +809,13 @@ private struct LayersTool: View {
     @State private var feather = 50.0
     @State private var lo = 60.0
     @State private var hi = 100.0
+    @State private var page = 0
+    private let pages: [(String, [String])] = [
+        ("Luce", ["exposure", "contrast", "highlights", "shadows", "whites", "blacks"]),
+        ("Colore", ["temp", "tint", "saturation"]),
+        ("Effetti", ["clarity", "texture", "dehaze"]),
+        ("Dettagli", ["sharpness", "noise", "moire", "defringe"]),
+    ]
 
     var body: some View {
         let selected = ed.masks.first { $0.id == ed.selectedMask }
@@ -816,15 +853,16 @@ private struct LayersTool: View {
                                  }
                              },
                              onVisible: { ed.setMaskVisible(m.id, !m.visible) },
+                             onInvert: { ed.invertMask(m.id) },
                              onDelete: { ed.deleteMask(m.id) })
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             if let m = selected {
                 shapeControls(m)
-                ToggleRow(label: "Inverti", on: m.invert) { _ in ed.invertMask(m.id) }
-                Text("REGOLAZIONI DEL LIVELLO").overline().padding(.top, 6)
-                Sliders(store: ed.localStore, ids: LocalControls.ids.map { "local.\($0)" })
+                Segment(options: pages.map(\.0), selected: page) { page = $0 }
+                    .padding(.top, 8)
+                Sliders(store: ed.localStore, ids: pages[page].1.map { "local.\($0)" }, labels: ["local.highlights": "Luci"])
             }
         }
         .onChange(of: ed.selectedMask) { _ in loadShape() }
@@ -842,19 +880,22 @@ private struct LayersTool: View {
     private func shapeControls(_ m: MaskInfo) -> some View {
         switch m.kind {
         case "brush":
-            Segment(options: ["Dipingi", "Cancella"], selected: ed.erasing ? 1 : 0) { ed.erasing = $0 == 1 }
-                .padding(.top, 4)
-            ValueSlider(control: Control(id: "brush.size", label: "Dimensione", min: 0.5, max: 25, def: 3, step: 0.1, decimals: 1, track: .plain),
-                        value: ed.brushSize * 100, onChange: { ed.brushSize = $0 / 100 })
-                .frame(height: ToolSlider.height)
-            ValueSlider(control: Control(id: "brush.feather", label: "Sfumatura", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
-                        value: ed.brushFeather, onChange: { ed.brushFeather = $0 })
-                .frame(height: ToolSlider.height)
-            ValueSlider(control: Control(id: "brush.flow", label: "Flusso", min: 1, max: 100, def: 100, step: 1, decimals: 0, track: .plain),
-                        value: ed.brushFlow, onChange: { ed.brushFlow = $0 })
-                .frame(height: ToolSlider.height)
             FlatButton(title: ed.cursorTool == .paint ? "Pennello attivo" : "Dipingi sulla foto", icon: "paintbrush.pointed", prominent: ed.cursorTool == .paint) {
                 ed.cursorTool = ed.cursorTool == .paint ? .none : .paint
+            }
+            .padding(.top, 4)
+            if ed.cursorTool == .paint {
+                Segment(options: ["Dipingi", "Cancella"], selected: ed.erasing ? 1 : 0) { ed.erasing = $0 == 1 }
+                    .padding(.top, 6)
+                ValueSlider(control: Control(id: "brush.size", label: "Dimensione", min: 0.5, max: 25, def: 3, step: 0.1, decimals: 1, track: .plain),
+                            value: ed.brushSize * 100, onChange: { ed.brushSize = $0 / 100 })
+                    .frame(height: ToolSlider.height)
+                ValueSlider(control: Control(id: "brush.feather", label: "Sfumatura", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
+                            value: ed.brushFeather, onChange: { ed.brushFeather = $0 })
+                    .frame(height: ToolSlider.height)
+                ValueSlider(control: Control(id: "brush.flow", label: "Flusso", min: 1, max: 100, def: 100, step: 1, decimals: 0, track: .plain),
+                            value: ed.brushFlow, onChange: { ed.brushFlow = $0 })
+                    .frame(height: ToolSlider.height)
             }
         case "linear", "radial":
             if m.kind == "radial" {
@@ -894,6 +935,7 @@ private struct LayerRow: View {
     let selected: Bool
     let onSelect: () -> Void
     let onVisible: () -> Void
+    let onInvert: () -> Void
     let onDelete: () -> Void
 
     var body: some View {
@@ -908,6 +950,13 @@ private struct LayerRow: View {
             Image(systemName: mask.icon).font(.system(size: 13)).foregroundColor(selected ? Lc.accent : Lc.text2)
             Text(mask.name.isEmpty ? mask.label : mask.name).font(Typo.label).foregroundColor(selected ? Lc.text : Lc.text2).lineLimit(1)
             Spacer(minLength: 4)
+            Button(action: onInvert) {
+                Image(systemName: "circle.lefthalf.filled")
+                    .font(.system(size: 13))
+                    .foregroundColor(mask.invert ? Lc.accent : Lc.text3)
+                    .frame(width: 30, height: 34)
+            }
+            .buttonStyle(.plain)
             Button(action: onDelete) {
                 Image(systemName: "trash").font(.system(size: 12)).foregroundColor(Lc.text3).frame(width: 30, height: 34)
             }
@@ -962,6 +1011,12 @@ private struct StylesTool: View {
     var body: some View {
         let groups = presetGroups(model.presets)
         VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                FlatButton(title: "Copia", icon: "doc.on.doc") { ed.copySettings(); model.say("Regolazioni copiate") }
+                FlatButton(title: "Applica", icon: "doc.on.clipboard", enabled: ed.hasCopy) { ed.pasteSettings() }
+                FlatButton(title: "Auto", icon: "wand.and.stars") { ed.run("develop.auto") }
+            }
+            .padding(.top, 2)
             HStack(spacing: 6) {
                 FlatButton(title: "Nuovo", icon: "plus") { creating = true }
                 FlatButton(title: "Importa", icon: "square.and.arrow.down") { importing = true }

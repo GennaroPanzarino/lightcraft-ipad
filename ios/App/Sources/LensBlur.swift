@@ -51,6 +51,20 @@ struct DepthMap {
         return s[min(s.count - 1, Int(Double(s.count) * 0.92))]
     }
 
+    /// The part of the map under `n` (0…1 of the picture): the depth of a zoomed-in window.
+    func sub(_ n: CGRect) -> DepthMap {
+        let w = max(8, Int((Double(width) * Double(n.width)).rounded())), h = max(8, Int((Double(height) * Double(n.height)).rounded()))
+        var v = [Float](repeating: 0, count: w * h)
+        for y in 0..<h {
+            let sy = min(height - 1, max(0, Int((Double(n.minY) + (Double(y) + 0.5) / Double(h) * Double(n.height)) * Double(height))))
+            for x in 0..<w {
+                let sx = min(width - 1, max(0, Int((Double(n.minX) + (Double(x) + 0.5) / Double(w) * Double(n.width)) * Double(width))))
+                v[y * w + x] = values[sy * width + sx]
+            }
+        }
+        return DepthMap(width: w, height: h, values: v)
+    }
+
     /// The map as a picture (near = light), for "show depth".
     var image: CGImage? {
         let px = values.map { UInt8(max(0, min(255, $0 * 255))) }
@@ -91,8 +105,15 @@ final class DepthEstimator: @unchecked Sendable {
         loaded = true
         guard let url = Bundle.main.url(forResource: "DepthAnything", withExtension: "mlmodelc") else { return }
         let cfg = MLModelConfiguration()
-        cfg.computeUnits = .all
+        // the GPU: ready in a moment (the Neural Engine would first compile the model for itself,
+        // which can take a minute on the first use)
+        cfg.computeUnits = .cpuAndGPU
         model = try? MLModel(contentsOf: url, configuration: cfg)
+    }
+
+    /// The model loaded ahead (at start, in the background), so the first blur doesn't wait for it.
+    func preload() {
+        queue.async { self.load() }
     }
 
     private func run(_ image: CGImage) -> DepthMap? {
@@ -100,7 +121,7 @@ final class DepthEstimator: @unchecked Sendable {
         if let m = model, let px = DepthEstimator.buffer(image, DepthEstimator.side, DepthEstimator.side),
            let out = try? m.prediction(from: MLDictionaryFeatureProvider(dictionary: ["image": MLFeatureValue(pixelBuffer: px)])),
            let arr = out.featureValue(for: "depth")?.multiArrayValue {
-            source = "Neural Engine · Depth Anything V2"
+            source = "GPU · Depth Anything V2"
             return DepthEstimator.normalized(arr)
         }
         if let p = people(image) {
@@ -174,7 +195,7 @@ enum LensBlurRenderer {
     static let context = CIContext(options: [.cacheIntermediates: false])
 
     /// The blur mask (white = most blur) for a depth map, as a Core Image picture of `size`.
-    private static func mask(_ d: DepthMap, _ s: LensBlurState, size: CGSize) -> CIImage? {
+    private static func mask(_ d: DepthMap, _ s: LensBlurState, size: CGSize, reference: CGFloat) -> CIImage? {
         let focus = Float(s.focus ?? Double(d.subject))
         let half = Float(s.range) / 2
         let soft: Float = 0.1
@@ -190,23 +211,56 @@ enum LensBlurRenderer {
         let m = CIImage(cgImage: g)
         let t = CGAffineTransform(scaleX: size.width / CGFloat(d.width), y: size.height / CGFloat(d.height))
         // a soft edge between sharp and blurred
-        return m.transformed(by: t).clampedToExtent().applyingGaussianBlur(sigma: Double(max(size.width, size.height)) * 0.004).cropped(to: CGRect(origin: .zero, size: size))
+        return m.transformed(by: t).clampedToExtent().applyingGaussianBlur(sigma: Double(reference) * 0.003).cropped(to: CGRect(origin: .zero, size: size))
     }
 
-    static func blurred(_ input: CIImage, depth: DepthMap, _ s: LensBlurState) -> CIImage? {
+    /// `input` disc-blurred by `radius` pixels, worked at a fraction of its size (a blur hides the
+    /// difference, and it costs a fraction of the time).
+    private static func disc(_ input: CIImage, radius: Double) -> CIImage? {
+        let k: CGFloat = radius > 24 ? 0.25 : (radius > 8 ? 0.5 : 1)
+        let small = input.clampedToExtent().transformed(by: CGAffineTransform(scaleX: k, y: k))
+        guard let f = CIFilter(name: "CIDiscBlur") else { return nil }
+        f.setValue(small, forKey: kCIInputImageKey)
+        f.setValue(max(0.5, radius * Double(k)), forKey: kCIInputRadiusKey)
+        return f.outputImage?.transformed(by: CGAffineTransform(scaleX: 1 / k, y: 1 / k)).cropped(to: input.extent)
+    }
+
+    /// The mask's values stretched: `scale × m + bias`, kept within 0…1.
+    private static func ramp(_ m: CIImage, scale: CGFloat, bias: CGFloat) -> CIImage {
+        m.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: scale, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: scale, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: scale, w: 0),
+            "inputBiasVector": CIVector(x: bias, y: bias, z: bias, w: 0),
+        ]).applyingFilter("CIColorClamp")
+    }
+
+    /// The photo with the lens blur: half the blur where the mask is half, all of it where it is
+    /// white. `reference`: the long edge of the whole photo at this scale (a window of a zoomed-in
+    /// view blurs as much as the whole photo would).
+    static func blurred(_ input: CIImage, depth: DepthMap, _ s: LensBlurState, reference: CGFloat? = nil) -> CIImage? {
         let size = input.extent.size
-        guard s.enabled, s.amount > 0, let m = mask(depth, s, size: size), let f = CIFilter(name: "CIMaskedVariableBlur") else { return nil }
-        f.setValue(input.clampedToExtent(), forKey: kCIInputImageKey)
-        f.setValue(m, forKey: "inputMask")
-        f.setValue(s.amount / 100 * Double(max(size.width, size.height)) * 0.014, forKey: kCIInputRadiusKey)
-        return f.outputImage?.cropped(to: input.extent)
+        let ref = reference ?? max(size.width, size.height)
+        guard s.enabled, s.amount > 0, let m = mask(depth, s, size: size, reference: ref) else { return nil }
+        let radius = s.amount / 100 * Double(ref) * 0.014
+        guard let strong = disc(input, radius: radius), let medium = disc(input, radius: radius * 0.45),
+              let a = CIFilter(name: "CIBlendWithMask"), let b = CIFilter(name: "CIBlendWithMask") else { return nil }
+        a.setValue(medium, forKey: kCIInputImageKey)
+        a.setValue(input, forKey: kCIInputBackgroundImageKey)
+        a.setValue(ramp(m, scale: 2, bias: 0), forKey: kCIInputMaskImageKey)
+        guard let half = a.outputImage else { return nil }
+        b.setValue(strong, forKey: kCIInputImageKey)
+        b.setValue(half, forKey: kCIInputBackgroundImageKey)
+        b.setValue(ramp(m, scale: 2, bias: -1), forKey: kCIInputMaskImageKey)
+        return b.outputImage?.cropped(to: input.extent)
     }
 
     /// A picture of the viewer with the blur.
-    static func apply(_ image: CGImage, depth: DepthMap, _ s: LensBlurState) -> CGImage? {
+    static func apply(_ image: CGImage, depth: DepthMap, _ s: LensBlurState, reference: CGFloat? = nil) -> CGImage? {
         let input = CIImage(cgImage: image)
-        guard let out = blurred(input, depth: depth, s) else { return nil }
-        return context.createCGImage(out, from: input.extent, format: .RGBA8, colorSpace: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!)
+        guard let out = blurred(input, depth: depth, s, reference: reference) else { return nil }
+        let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        return context.createCGImage(out, from: input.extent, format: .RGBA8, colorSpace: space)
     }
 
     /// An exported JPEG or TIFF blurred in place, its metadata and depth kept.
@@ -217,7 +271,7 @@ enum LensBlurRenderer {
         let input = CIImage(cgImage: image)
         guard let out = blurred(input, depth: depth, s) else { return false }
         let deep = image.bitsPerComponent > 8
-        let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB)!
+        let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         guard let cg = context.createCGImage(out, from: input.extent, format: deep ? .RGBA16 : .RGBA8, colorSpace: space),
               let dest = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else { return false }
         var p = props

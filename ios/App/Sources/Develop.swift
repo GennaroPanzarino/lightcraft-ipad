@@ -65,6 +65,27 @@ enum Band: String, CaseIterable, Identifiable {
     }
     var color: Color { Color(hex: hex) }
     var ui: UIColor { UIColor(hex: hex) }
+    /// Where the band sits on the colour wheel (degrees).
+    var hue: Double {
+        switch self {
+        case .red: return 0
+        case .orange: return 30
+        case .yellow: return 58
+        case .green: return 120
+        case .aqua: return 180
+        case .blue: return 222
+        case .purple: return 268
+        case .magenta: return 312
+        }
+    }
+
+    /// Lightroom's hue track: the hue the band turns to on the left, its own, the one on the right.
+    var hueTrack: [UIColor] {
+        stride(from: -40.0, through: 40.0, by: 10.0).map { d in
+            let h = ((hue + d).truncatingRemainder(dividingBy: 360) + 360).truncatingRemainder(dividingBy: 360) / 360
+            return UIColor(hue: CGFloat(h), saturation: 0.82, brightness: 0.92, alpha: 1)
+        }
+    }
 }
 
 /// The colour balance zones.
@@ -174,7 +195,7 @@ enum Controls {
     /// The app's names for the engine's controls (Capture One's, in Italian).
     static let names: [String: String] = {
         var m: [String: String] = [
-            "light.exposure": "Esposizione", "light.contrast": "Contrasto", "light.highlights": "Alteluci",
+            "light.exposure": "Esposizione", "light.contrast": "Contrasto", "light.highlights": "Luci",
             "light.shadows": "Ombre", "light.whites": "Bianco", "light.blacks": "Nero",
             "color.vibrance": "Vividezza", "color.saturation": "Saturazione", "wb.temp": "Kelvin", "wb.tint": "Tinta",
             "effects.texture": "Struttura", "effects.clarity": "Chiarezza", "effects.dehaze": "Quantità",
@@ -221,7 +242,7 @@ enum Controls {
         if id == "wb.temp" { return .gradient([UIColor(hex: 0x3B6FD8), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xE8B83A)]) }
         if id == "wb.tint" { return .gradient([UIColor(hex: 0x3FAE5A), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xD94FB0)]) }
         for b in Band.allCases {
-            if id == "mixer.\(b.rawValue).hue" { return .gradient([b.ui.withAlphaComponent(0.55), b.ui, b.ui.withAlphaComponent(0.55)]) }
+            if id == "mixer.\(b.rawValue).hue" { return .gradient(b.hueTrack) }
             if id == "mixer.\(b.rawValue).sat" { return .gradient([gray, b.ui]) }
             if id == "mixer.\(b.rawValue).lum" { return .gradient([UIColor(hex: 0x151515), b.ui, UIColor(hex: 0xF5F5F5)]) }
         }

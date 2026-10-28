@@ -3718,6 +3718,7 @@ dependencies = [
  "jni 0.21.1",
  "libc",
  "lightcraft-engine",
+ "lightcraft-pipeline",
  "log",
  "rayon",
  "serde_json",

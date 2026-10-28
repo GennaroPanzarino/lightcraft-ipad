@@ -159,7 +159,21 @@ final class Library: ObservableObject {
         do {
             let small = await Task.detached { Library.shrink(url) }.value
             let id = try await importFile(small, into: previews)
-            await look(id, on: previews)
+            if settings().copyLast {
+                if let prev = shots.last(where: { $0.key != key && $0.photo != 0 })?.photo,
+                   var lastLook = try? await engine.object("develop.get", ["id": prev]) {
+                    // the last shot's look, not its framing, retouching or raw-only settings
+                    for k in ["crop", "masks", "spots", "red_eye", "point_colors", "orientation", "version", "process", "wb", "profile", "geometry", "optics", "lens_blur", "enhance"] {
+                        lastLook.removeValue(forKey: k)
+                    }
+                    _ = try? await previews.batch { e in
+                        _ = try e.execNow("library.select", ["ids": [id], "active": id])
+                        _ = try e.execNow("develop.merge", ["settings": lastLook])
+                    }
+                }
+            } else {
+                await look(id, on: previews)
+            }
             let pic = try await previews.render(id, screen.w, screen.h).image
             if shot(key)?.stage == .ready { return } // the raw was quicker
             edit(key) {
@@ -179,11 +193,13 @@ final class Library: ObservableObject {
             // the shot before it (for "copy from the last capture")
             let previous = shots.last { $0.key != key && $0.photo != 0 }?.photo
             let id = try await importFile(url, into: engine)
-            if settings().copyLast, let prev = previous {
-                _ = try? await engine.batch { e in
-                    _ = try e.execNow("library.select", ["ids": [prev], "active": prev])
-                    _ = try e.execNow("develop.copy")
-                    _ = try e.execNow("develop.paste", ["ids": [id]])
+            if settings().copyLast {
+                if let prev = previous {
+                    _ = try? await engine.batch { e in
+                        _ = try e.execNow("library.select", ["ids": [prev], "active": prev])
+                        _ = try e.execNow("develop.copy")
+                        _ = try e.execNow("develop.paste", ["ids": [id]])
+                    }
                 }
             } else {
                 await look(id, on: engine)

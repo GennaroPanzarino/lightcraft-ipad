@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 lightcraft-engine = { workspace = true }
+lightcraft-pipeline = { workspace = true }
 serde_json = { workspace = true }
 rayon = { workspace = true }
 log = { workspace = true }

@@ -144,6 +144,16 @@ impl Core {
         Ok(json!({"width": img.width, "height": img.height, "ms": t0.elapsed().as_secs_f64() * 1000.0, "gpuFallback": r.gpu_fallback}))
     }
 
+    /// One window of the photo as the viewer would draw it whole at `full_w × full_h` (a zoomed-in
+    /// view: only what is on screen, at the screen's resolution).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_region(&mut self, id: u64, full_w: usize, full_h: usize, x: usize, y: usize, w: usize, h: usize, out: &mut [u8]) -> Result<Value, String> {
+        let t0 = Instant::now();
+        let window = lightcraft_pipeline::PixelWindow { x, y, w: w.max(1), h: h.max(1) };
+        let job = self.session.region_job(PhotoId(id), full_w.max(8), full_h.max(8), window, true).ok_or("region not available")?;
+        self.run_into(job, out, t0)
+    }
+
     /// The photo with its edits but not its crop and straightening (what the crop tool shows: the
     /// crop is drawn over it), fitted into `max_w × max_h`.
     pub fn render_uncropped(&mut self, id: u64, max_w: usize, max_h: usize, draft: bool, out: &mut [u8]) -> Result<Value, String> {

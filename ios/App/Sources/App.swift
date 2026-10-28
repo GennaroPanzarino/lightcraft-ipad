@@ -83,27 +83,50 @@ private struct HeroZoom: View {
     let hero: Hero
     let done: () -> Void
     @State private var target: CGRect?
+    @State private var leaving = false
 
     var body: some View {
         GeometryReader { geo in
             let origin = geo.frame(in: .global).origin
             let size = CGSize(width: hero.image.width, height: hero.image.height)
             let r = fitted(size, in: target ?? hero.from).offsetBy(dx: -origin.x, dy: -origin.y)
-            Image(decorative: hero.image, scale: 1)
-                .resizable()
-                .frame(width: r.width, height: r.height)
-                .position(x: r.midX, y: r.midY)
-                .shadow(color: .black.opacity(target == nil ? 0 : 0.5), radius: 20)
+            ZStack {
+                // the library's backdrop, fading as the photo opens: the workspace appears behind it
+                Lc.window.opacity(target == nil ? 1 : 0)
+                Image(decorative: hero.image, scale: 1)
+                    .resizable()
+                    .frame(width: r.width, height: r.height)
+                    .position(x: r.midX, y: r.midY)
+            }
+            .opacity(leaving ? 0 : 1)
         }
         .ignoresSafeArea()
         .allowsHitTesting(false)
-        .onAppear {
-            // the viewer has been measured by the next turn of the run loop
-            DispatchQueue.main.async {
-                let t = model.viewerFrame == .zero ? UIScreen.main.bounds : model.viewerFrame
-                withAnimation(.spring(response: 0.34, dampingFraction: 0.9)) { target = t }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { done() }
+        .onAppear { start(Date(), measured: model.viewerMeasures) }
+    }
+
+    /// Off once the viewer has been measured in the workspace just shown (a stale or empty frame
+    /// would land the photo in the wrong place).
+    private func start(_ t0: Date, measured: Int) {
+        let waited = Date().timeIntervalSince(t0)
+        let frame = model.viewerFrame
+        let fresh = model.viewerMeasures > measured || waited > 0.05
+        guard frame.width > 1, frame.height > 1, fresh || waited > 0.2 else {
+            if waited > 0.3 {
+                go(to: UIScreen.main.bounds)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.016) { start(t0, measured: measured) }
             }
+            return
+        }
+        go(to: frame)
+    }
+
+    private func go(to frame: CGRect) {
+        withAnimation(.easeOut(duration: 0.26)) { target = frame }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.27) {
+            withAnimation(.easeOut(duration: 0.1)) { leaving = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.11) { done() }
         }
     }
 

@@ -1,23 +1,30 @@
 import SwiftUI
 import UIKit
 
-/// The photo in the viewer: pinch to zoom (up to 16×: the photo is rendered at full size once you
-/// zoom in), double tap to look closer and back, drag to look around once zoomed — the system's own
-/// scroll view, with its inertia and bounce. Not zoomed, the photo follows a horizontal drag and the
-/// next or previous shot slides in with it, as in a gallery. Pictures arrive straight from the engine
-/// (`show`), not through SwiftUI.
+/// The photo in the viewer: pinch to zoom (up to 16×), double tap to look closer and back, drag to
+/// look around once zoomed — the system's own scroll view, with its inertia and bounce. Zoomed in,
+/// only what is on screen is developed again, sharp, at the screen's resolution (Lightroom's way:
+/// never the whole 33 MP photo). Not zoomed, the photo follows a horizontal drag and the next or
+/// previous shot slides in with it, as in a gallery. Pictures arrive straight from the engine.
 final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+    /// A single tap, at once (no waiting to see if a second one follows): where, 0…1 of the picture.
     var onTap: ((CGPoint?) -> Void)?
+    /// The second tap of a double tap (the first one's effect may be taken back).
+    var onDoubleTap: (() -> Void)?
     var onZoom: ((CGFloat) -> Void)?
     /// Go to the next (+1) or previous (−1) shot; `neighbor` gives its picture (nil: there is none).
     var onPage: ((Int) -> Void)?
     var neighbor: ((Int) -> CGImage?)?
+    /// A sharp picture of the window `rect` (0…1 of the picture) of the photo drawn whole at `full`
+    /// pixels: `token` comes back with it.
+    var onRegion: ((CGRect, CGSize, Int) -> Void)?
 
     private let scroll = UIScrollView()
     private let imageView = UIImageView()
+    private let detail = UIImageView()
+    private let side = UIImageView()
     /// Spots, strokes and gradients on the photo (it zooms with it).
     let overlay = EditOverlay()
-    private let side = UIImageView()
     private var key = ""
     private var current: CGImage?
     private var held: CGImage?
@@ -26,6 +33,8 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     private var sideImage: CGImage?
     private var sideDir = 0
     private let gap: CGFloat = 24
+    private var regionToken = 0
+    private var lastTap = Date.distantPast
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -44,6 +53,9 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         imageView.isUserInteractionEnabled = true
         imageView.layer.minificationFilter = .trilinear
         scroll.addSubview(imageView)
+        detail.isHidden = true
+        detail.contentMode = .scaleToFill
+        imageView.addSubview(detail)
         overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         overlay.isUserInteractionEnabled = false
         imageView.addSubview(overlay)
@@ -52,9 +64,10 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         addSubview(side)
         let double = UITapGestureRecognizer(target: self, action: #selector(doubleTap(_:)))
         double.numberOfTapsRequired = 2
+        double.delaysTouchesEnded = false
         scroll.addGestureRecognizer(double)
         let single = UITapGestureRecognizer(target: self, action: #selector(singleTap(_:)))
-        single.require(toFail: double)
+        single.delegate = self
         scroll.addGestureRecognizer(single)
         paging = UIPanGestureRecognizer(target: self, action: #selector(paged(_:)))
         paging.delegate = self
@@ -73,7 +86,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     }
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
-        g === paging && other === scroll.panGestureRecognizer
+        (g === paging && other === scroll.panGestureRecognizer) || (g is UITapGestureRecognizer && other is UITapGestureRecognizer)
     }
 
     /// A new shot: back to fit.
@@ -83,27 +96,34 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         scroll.setZoomScale(1, animated: false)
         current = nil
         held = nil
+        dropDetail()
     }
 
-    func show(_ image: CGImage?) {
+    func show(_ image: CGImage?, draft: Bool = false) {
         guard let image = image, image !== current else { return }
         let first = current == nil && imageView.image == nil
         current = image
         guard held == nil else { return }
         set(image, fade: first)
+        // a new look: its sharp window follows once the finger lifts
+        if scroll.zoomScale > 1.05 {
+            dropDetail()
+            if !draft { requestDetail() }
+        }
     }
 
-    /// Another picture over the photo for a while (the "before" button).
+    /// Another picture over the photo for a while (the "before" button, the depth map).
     func hold(_ image: CGImage?) {
         guard image !== held else { return }
         held = image
+        detail.isHidden = image != nil || detail.image == nil
         if let i = image { set(i, fade: false) } else if let c = current { set(c, fade: false) }
     }
 
     private func set(_ image: CGImage, fade: Bool) {
         let ui = UIImage(cgImage: image)
         if fade {
-            UIView.transition(with: imageView, duration: 0.15, options: [.transitionCrossDissolve, .allowUserInteraction]) {
+            UIView.transition(with: imageView, duration: 0.12, options: [.transitionCrossDissolve, .allowUserInteraction]) {
                 self.imageView.image = ui
             }
         } else {
@@ -135,6 +155,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
             overlay.frame = imageView.bounds
             scroll.contentSize = f
             scroll.zoomScale = zoom
+            dropDetail()
         }
         center()
     }
@@ -145,10 +166,84 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         scroll.contentInset = UIEdgeInsets(top: max(0, (b.height - f.height) / 2), left: max(0, (b.width - f.width) / 2), bottom: 0, right: 0)
     }
 
+    // MARK: zoom, and the sharp window
+
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+
     func scrollViewDidZoom(_ scrollView: UIScrollView) {
         center()
         overlay.zoom = scrollView.zoomScale
+        if scrollView.zoomScale <= 1.05 { dropDetail() }
+    }
+
+    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
+        onZoom?(scale)
+        requestDetail()
+    }
+
+    func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+        if !decelerate { requestDetail() }
+    }
+
+    func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { requestDetail() }
+
+    private func dropDetail() {
+        regionToken += 1
+        detail.isHidden = true
+        detail.image = nil
+    }
+
+    /// What is on screen, developed again at the screen's resolution.
+    private func requestDetail() {
+        guard scroll.zoomScale > 1.05, held == nil, imageView.bounds.width > 0 else { return }
+        let b = imageView.bounds
+        let visible = scroll.convert(scroll.bounds, to: imageView).intersection(b)
+        guard visible.width > 1, visible.height > 1 else { return }
+        let scale = scroll.zoomScale * (window?.screen.scale ?? UIScreen.main.scale)
+        let full = CGSize(width: (b.width * scale).rounded(), height: (b.height * scale).rounded())
+        let n = CGRect(x: visible.minX / b.width, y: visible.minY / b.height, width: visible.width / b.width, height: visible.height / b.height)
+        regionToken += 1
+        onRegion?(n, full, regionToken)
+    }
+
+    func showDetail(_ image: CGImage, _ n: CGRect, token: Int) {
+        guard token == regionToken, scroll.zoomScale > 1.05, held == nil else { return }
+        let b = imageView.bounds
+        detail.image = UIImage(cgImage: image)
+        detail.frame = CGRect(x: n.minX * b.width, y: n.minY * b.height, width: n.width * b.width, height: n.height * b.height)
+        detail.isHidden = false
+    }
+
+    @objc private func doubleTap(_ g: UITapGestureRecognizer) {
+        onDoubleTap?()
+        if scroll.zoomScale > 1.02 {
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                self.scroll.setZoomScale(1, animated: false)
+                self.center()
+            } completion: { _ in self.onZoom?(1) }
+        } else {
+            let p = g.location(in: imageView)
+            let s: CGFloat = 3
+            let size = CGSize(width: scroll.bounds.width / s, height: scroll.bounds.height / s)
+            let target = CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height)
+            UIView.animate(withDuration: 0.16, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                self.scroll.zoom(to: target, animated: false)
+            } completion: { _ in
+                self.onZoom?(self.scroll.zoomScale)
+                self.requestDetail()
+            }
+        }
+    }
+
+    @objc private func singleTap(_ g: UITapGestureRecognizer) {
+        // the second tap of a double tap is the double tap's
+        let now = Date()
+        defer { lastTap = now }
+        if now.timeIntervalSince(lastTap) < 0.35 { return }
+        let p = g.location(in: imageView)
+        let size = imageView.bounds.size
+        let inside = p.x >= 0 && p.y >= 0 && p.x <= size.width && p.y <= size.height && size.width > 0
+        onTap?(inside ? CGPoint(x: p.x / size.width, y: p.y / size.height) : nil)
     }
 
     /// A cursor tool on the photo: one finger is the tool's, two fingers still move and zoom.
@@ -157,27 +252,6 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         let drawing = [.spot, .paint, .shape, .sample, .focus].contains(tool)
         scroll.panGestureRecognizer.minimumNumberOfTouches = drawing ? 2 : 1
         paging.isEnabled = !drawing
-    }
-    func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) { onZoom?(scale) }
-
-    @objc private func doubleTap(_ g: UITapGestureRecognizer) {
-        if scroll.zoomScale > 1.02 {
-            scroll.setZoomScale(1, animated: true)
-            onZoom?(1)
-        } else {
-            let p = g.location(in: imageView)
-            let s: CGFloat = 3
-            let size = CGSize(width: scroll.bounds.width / s, height: scroll.bounds.height / s)
-            scroll.zoom(to: CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height), animated: true)
-            onZoom?(s)
-        }
-    }
-
-    @objc private func singleTap(_ g: UITapGestureRecognizer) {
-        let p = g.location(in: imageView)
-        let size = imageView.bounds.size
-        let inside = p.x >= 0 && p.y >= 0 && p.x <= size.width && p.y <= size.height && size.width > 0
-        onTap?(inside ? CGPoint(x: p.x / size.width, y: p.y / size.height) : nil)
     }
 
     // MARK: paging
@@ -218,7 +292,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
             if go {
                 let shift = CGFloat(-dir) * (bounds.width + gap)
                 let next = sideImage
-                UIView.animate(withDuration: 0.24, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+                UIView.animate(withDuration: 0.22, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
                     self.scroll.transform = CGAffineTransform(translationX: shift, y: 0)
                     self.placeSide(shift)
                 } completion: { _ in
@@ -236,7 +310,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
                     self.onPage?(dir)
                 }
             } else {
-                UIView.animate(withDuration: 0.22, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
+                UIView.animate(withDuration: 0.2, delay: 0, usingSpringWithDamping: 0.9, initialSpringVelocity: 0, options: [.allowUserInteraction]) {
                     self.scroll.transform = .identity
                     self.placeSide(0.001 * CGFloat(-dir))
                 } completion: { _ in
@@ -255,10 +329,16 @@ struct ViewerHost: UIViewRepresentable {
     var onZoom: (CGFloat) -> Void
     var before: CGImage?
 
+    func makeCoordinator() -> Taps { Taps() }
+
+    /// When a tap last showed or hid the toolbar and tools (a double tap takes it back).
+    final class Taps { var toggledAt = Date.distantPast }
+
     func makeUIView(context: Context) -> PhotoViewer {
         let v = PhotoViewer()
         let model = self.model
-        model.loupe.onViewer = { [weak v] p in v?.show(p.image) }
+        let taps = context.coordinator
+        model.loupe.onViewer = { [weak v] p in v?.show(p.image, draft: p.draft) }
         let ed = model.editor
         v.overlay.onSpot = { p in ed.addSpot(p) }
         v.overlay.onSample = { p in ed.sampleColor(p, add: false) }
@@ -273,8 +353,19 @@ struct ViewerHost: UIViewRepresentable {
             if model.editor.picking, let p = p {
                 model.editor.pickWhite(p)
             } else if model.editor.cursorTool == .none {
-                withAnimation(Motion.panel) { model.chrome.toggle() }
+                // at once, no animation: the photo takes the room or gives it back
+                model.chrome.toggle()
+                taps.toggledAt = Date()
             }
+        }
+        v.onDoubleTap = {
+            if Date().timeIntervalSince(taps.toggledAt) < 0.45 {
+                model.chrome.toggle()
+                taps.toggledAt = .distantPast
+            }
+        }
+        v.onRegion = { [weak v] n, full, token in
+            model.renderDetail(window: n, full: full) { img, rect in v?.showDetail(img, rect, token: token) }
         }
         return v
     }

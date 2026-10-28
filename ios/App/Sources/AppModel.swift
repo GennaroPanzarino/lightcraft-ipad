@@ -69,8 +69,10 @@ final class AppModel: ObservableObject {
     @Published var openSettings = false
     @Published var hero: Hero?
     @Published private(set) var renderer = ""
-    /// Where the viewer is on screen (the zoom of a thumbnail ends there).
+    /// Where the viewer is on screen (the zoom of a thumbnail ends there), and how many times it was
+    /// measured (the zoom waits for a fresh one).
     var viewerFrame: CGRect = .zero
+    var viewerMeasures = 0
 
     let library: Library
     let loupe: Loupe
@@ -89,7 +91,7 @@ final class AppModel: ObservableObject {
         let s = Settings.load()
         // the GPU (Metal) unless the settings say the CPU: read by the engines when they open
         if !s.gpu { setenv("LIGHTCRAFT_GPU", "0", 1) }
-        engine = Engine(dir: docs.appendingPathComponent("library"), nice: 4, maxEdge: 8192)
+        engine = Engine(dir: docs.appendingPathComponent("library"), nice: 4)
         previews = Engine(dir: previewsDir.appendingPathComponent("library"), previews: true, maxEdge: 2560)
         shotsDir = docs.appendingPathComponent("shots")
         settings = s
@@ -157,6 +159,7 @@ final class AppModel: ObservableObject {
                 renderer = on ? "GPU · \(g.str("adapter"))" : "CPU" + (g.str("reason").isEmpty ? "" : " (\(g.str("reason")))")
                 NSLog("lightcraft renderer: \(renderer)")
             }
+            DepthEstimator.shared.preload()
             await syncPreviews()
             await library.restore()
             ready = true
@@ -164,9 +167,144 @@ final class AppModel: ObservableObject {
             if UserDefaults.standard.bool(forKey: "benchmark") { Task { await benchmark() } }
             if UserDefaults.standard.bool(forKey: "exportTest") { Task { await exportTest() } }
             if let t = UserDefaults.standard.string(forKey: "testTool") { Task { await testTool(t) } }
+            if UserDefaults.standard.bool(forKey: "stress") { Task { await stress() } }
         } catch {
             problem = error.localizedDescription
         }
+    }
+
+    /// Tests (`-stress YES`): every heavy path in a row, at a finger's pace or faster; the log says
+    /// how far it got (CI fails without "done").
+    private func stress() async {
+        func log(_ s: String) { NSLog("lightcraft stress: \(s)") }
+        func wait(_ s: Double) async { try? await Task.sleep(nanoseconds: UInt64(s * 1_000_000_000)) }
+        for _ in 0..<300 {
+            if editor.photo != 0 { break }
+            await wait(0.1)
+        }
+        guard editor.photo != 0 else { log("no photo"); return }
+        await wait(2)
+        let st = editor.store
+        st.onBegin?("Esposizione")
+        for i in 0..<60 {
+            st.userSet("light.exposure", Double(i % 20) * 0.1, from: nil)
+            await wait(0.008)
+        }
+        st.onEnd?()
+        await wait(1)
+        log("sliders ok")
+        editor.begin("Curva")
+        for i in 0..<40 {
+            editor.curve(.master, [CGPoint(x: 0, y: 0), CGPoint(x: 0.5, y: 0.5 + Double(i % 10) * 0.01), CGPoint(x: 1, y: 1)])
+            await wait(0.01)
+        }
+        editor.end()
+        await wait(1)
+        log("curve ok")
+        let full = CGSize(width: 6000, height: 4000)
+        for (i, n) in [CGRect(x: 0.2, y: 0.2, width: 0.3, height: 0.3), CGRect(x: 0.6, y: 0.5, width: 0.1, height: 0.1), CGRect(x: 0, y: 0, width: 0.06, height: 0.06)].enumerated() {
+            var got = false
+            renderDetail(window: n, full: full) { _, _ in got = true }
+            for _ in 0..<60 {
+                if got { break }
+                await wait(0.1)
+            }
+            log("region \(i) \(got ? "ok" : "none")")
+        }
+        var lb = editor.lensBlur
+        lb.enabled = true
+        lb.amount = 70
+        editor.setLensBlur(lb, live: false)
+        editor.commitLensBlur()
+        await wait(4)
+        for i in 0..<20 {
+            var l = editor.lensBlur
+            l.amount = Double(20 + i * 3)
+            editor.setLensBlur(l, live: true)
+            await wait(0.03)
+        }
+        editor.commitLensBlur()
+        await wait(2)
+        log("lens blur ok (\(editor.depthSource))")
+        lb = editor.lensBlur
+        lb.enabled = false
+        editor.setLensBlur(lb, live: false)
+        editor.commitLensBlur()
+        await wait(1)
+        editor.enterCrop()
+        await wait(1)
+        editor.begin("Ritaglio")
+        for i in 0..<20 {
+            editor.cropDrag("topLeft", from: CGPoint(x: 0, y: 0), to: CGPoint(x: Double(i) * 0.005, y: Double(i) * 0.004), start: CGRect(x: 0, y: 0, width: 1, height: 1))
+            await wait(0.02)
+        }
+        editor.end()
+        editor.exitCrop()
+        await wait(1)
+        log("crop ok")
+        editor.addMask("brush")
+        await wait(1)
+        editor.stroke((0..<40).map { CGPoint(x: 0.3 + Double($0) * 0.005, y: 0.5) }, pressure: [Float](repeating: 0.7, count: 40))
+        await wait(1)
+        editor.localStore.onBegin?("Esposizione")
+        for i in 0..<20 {
+            editor.localStore.userSet("local.exposure", Double(i) * 0.05, from: nil)
+            await wait(0.02)
+        }
+        editor.localStore.onEnd?()
+        await wait(1)
+        editor.addMask("radial")
+        await wait(1.5)
+        if let id = editor.selectedMask, let m = editor.masks.first(where: { $0.id == id }) {
+            editor.begin("Maschera")
+            for i in 0..<15 {
+                var s = m.shape
+                s["rx"] = 0.1 + Double(i) * 0.01
+                editor.updateShape(id, s)
+                await wait(0.03)
+            }
+            editor.end()
+        }
+        await wait(1)
+        editor.addMask("linear")
+        await wait(1)
+        editor.addMask("luminanceRange")
+        await wait(1)
+        for m in editor.masks { editor.deleteMask(m.id) }
+        await wait(1.5)
+        log("layers ok")
+        for i in 0..<4 {
+            editor.addSpot(CGPoint(x: 0.2 + Double(i) * 0.15, y: 0.4))
+            await wait(0.5)
+        }
+        log("spots ok (\(editor.spots.count))")
+        editor.run("spot.findDust")
+        await wait(6)
+        log("dust ok (\(editor.spots.count) spots)")
+        for p in presets.prefix(6) {
+            editor.applyPreset(p.id, amount: 100)
+            await wait(0.7)
+        }
+        log("styles ok")
+        for _ in 0..<6 {
+            editor.undo()
+            await wait(0.3)
+        }
+        for _ in 0..<3 {
+            editor.redo()
+            await wait(0.3)
+        }
+        log("history ok")
+        for _ in 0..<4 {
+            step(-1)
+            await wait(0.6)
+            step(1)
+            await wait(0.6)
+        }
+        log("paging ok")
+        editor.reset()
+        await wait(2)
+        log("done")
     }
 
     /// Tests (`-testTool crop|radial|brush|spots`): a cursor tool on, for the screenshots.
@@ -308,6 +446,26 @@ final class AppModel: ObservableObject {
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) { screen = .workspace }
+    }
+
+    /// A sharp window (`n`, 0…1 of the picture) of the shot on screen, as drawn whole at `full`
+    /// pixels: the zoomed-in viewer. With the lens blur when it is on.
+    func renderDetail(window n: CGRect, full: CGSize, done: @escaping (CGImage, CGRect) -> Void) {
+        guard let k = current, let p = library.shot(k)?.photo, p != 0 else { return }
+        let fw = Int(full.width), fh = Int(full.height)
+        guard fw > 16, fh > 16 else { return }
+        let x = max(0, min(fw - 1, Int((n.minX * full.width).rounded(.down))))
+        let y = max(0, min(fh - 1, Int((n.minY * full.height).rounded(.down))))
+        let w = max(1, min(fw - x, Int((n.width * full.width).rounded(.up))))
+        let h = max(1, min(fh - y, Int((n.height * full.height).rounded(.up))))
+        // a screen's worth at most (the window is what is on screen)
+        guard w * h <= 3200 * 3200 else { return }
+        let rect = CGRect(x: CGFloat(x) / full.width, y: CGFloat(y) / full.height, width: CGFloat(w) / full.width, height: CGFloat(h) / full.height)
+        Task {
+            guard let r = try? await engine.renderRegion(p, fullW: fw, fullH: fh, x: x, y: y, w: w, h: h), current == k else { return }
+            let img = await editor.blurDetail(r.image, window: rect, full: full) ?? r.image
+            if current == k { done(img, rect) }
+        }
     }
 
     /// The picture of the shot `by` places from the one on screen (for the viewer's paging).

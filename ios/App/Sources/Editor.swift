@@ -203,6 +203,15 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// A zoomed-in window (`n`, 0…1 of the picture) with the lens blur, when it is on.
+    func blurDetail(_ image: CGImage, window n: CGRect, full: CGSize) async -> CGImage? {
+        let state = liveBlur ?? lensBlur
+        guard state.enabled, let d = depth else { return nil }
+        let part = d.sub(n)
+        let ref = max(full.width, full.height)
+        return await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, depth: part, state, reference: ref) }.value
+    }
+
     /// The lens blur into the photo's settings (one undo step).
     func commitLensBlur() {
         if let l = liveBlur {

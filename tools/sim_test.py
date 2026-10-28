@@ -97,10 +97,24 @@ launch("-screen", "workspace", "-exportTest", "YES")
 time.sleep(70)
 shot("06_after_exports")
 
-log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "8m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
+# every heavy path in a row: the app must get to the end without crashing
+launch("-screen", "workspace", "-tool", "exposure", "-stress", "YES")
+time.sleep(95)
+shot("08_after_stress")
+
+log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "12m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
 open(os.path.join(OUT, "app.log"), "w").write(log)
 crashes = sh("bash", "-c", "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i lightcraft || true").stdout
 print("crash reports:", crashes or "none")
 for line in log.splitlines():
-    if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "export", "lensblur", "error", "Error")):
+    if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "export", "lensblur", "stress", "error", "Error")):
         print(line[:300])
+
+# the stress run must have finished, and nothing may have crashed
+if "lightcraft stress: done" not in log:
+    print("FAIL: the stress run did not finish")
+    sys.exit(1)
+if crashes.strip():
+    print("FAIL: crash reports:", crashes)
+    sys.exit(1)
+print("stress run: done, no crash")

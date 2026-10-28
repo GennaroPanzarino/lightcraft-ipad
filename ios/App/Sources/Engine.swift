@@ -156,6 +156,14 @@ final class Engine: @unchecked Sendable {
         }
     }
 
+    /// One window (`x, y, w, h` pixels) of the photo as drawn whole at `fullW × fullH`.
+    func renderRegion(_ photo: Int64, fullW: Int, fullH: Int, x: Int, y: Int, w: Int, h: Int) async throws -> Rendered {
+        try await run {
+            self.room(w, h)
+            return try self.picture(self.take(lc_render_region(self.handle, UInt64(photo), UInt32(fullW), UInt32(fullH), UInt32(x), UInt32(y), UInt32(w), UInt32(h), self.buffer, self.capacity)))
+        }
+    }
+
     /// The photo without its crop and straightening (the crop tool draws the crop over it).
     func renderUncropped(_ photo: Int64, _ w: Int, _ h: Int, draft: Bool = false) async throws -> Rendered {
         try await run {

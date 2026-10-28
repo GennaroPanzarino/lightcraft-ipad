@@ -159,6 +159,18 @@ pub unsafe extern "C" fn lc_render_before(h: *mut c_void, photo: u64, w: u32, hh
     with_core(h, move |c| c.render_before(photo, w.max(1) as usize, hh.max(1) as usize, b))
 }
 
+/// One window of the photo as drawn whole at `full_w × full_h` (the zoomed-in viewer).
+///
+/// # Safety
+/// As `lc_render`.
+#[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn lc_render_region(h: *mut c_void, photo: u64, full_w: u32, full_h: u32, x: u32, y: u32, w: u32, hh: u32, buf: *mut u8, cap: usize) -> *mut c_char {
+    // SAFETY: as documented.
+    let b = unsafe { buffer(buf, cap) };
+    with_core(h, move |c| c.render_region(photo, full_w as usize, full_h as usize, x as usize, y as usize, w as usize, hh as usize, b))
+}
+
 /// The photo without its crop and straightening (the crop tool's picture).
 ///
 /// # Safety

@@ -244,6 +244,7 @@ private struct ViewerArea: View {
         px = (w: Int(geo.size.width * s), h: Int(geo.size.height * s))
         ed.viewport = (w: min(4096, px.w), h: min(4096, px.h))
         model.viewerFrame = geo.frame(in: .global)
+        model.viewerMeasures += 1
         want()
     }
 
@@ -255,8 +256,7 @@ private struct ViewerArea: View {
         guard let i = shots.firstIndex(where: { $0.key == (model.current ?? shots.last?.key) }) else { return }
         let order = [i, i + 1, i - 1].filter { $0 >= 0 && $0 < shots.count }.map { shots[$0] }
         model.loupe.show(order.filter { $0.photo != 0 }.map { s in
-            let big = s.key == model.current && zoomed
-            return Loupe.Want(key: s.key, photo: s.photo, revision: s.revision, w: big ? 8192 : w, h: big ? 8192 : h)
+            Loupe.Want(key: s.key, photo: s.photo, revision: s.revision, w: w, h: h)
         })
     }
 }
