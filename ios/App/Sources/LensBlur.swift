@@ -208,10 +208,12 @@ enum LensBlurRenderer {
               let g = CGImage(width: d.width, height: d.height, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: d.width, space: CGColorSpaceCreateDeviceGray(),
                               bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue), provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
         else { return nil }
-        let m = CIImage(cgImage: g)
-        let t = CGAffineTransform(scaleX: size.width / CGFloat(d.width), y: size.height / CGFloat(d.height))
-        // a soft edge between sharp and blurred
-        return m.transformed(by: t).clampedToExtent().applyingGaussianBlur(sigma: Double(reference) * 0.003).cropped(to: CGRect(origin: .zero, size: size))
+        // a soft edge between sharp and blurred, made at the depth map's size (cheap), then
+        // stretched to the picture's
+        let k = size.width / CGFloat(max(1, d.width))
+        let soft = CIImage(cgImage: g).clampedToExtent().applyingGaussianBlur(sigma: Double(reference) * 0.003 / Double(max(k, 0.01)))
+        let t = CGAffineTransform(scaleX: k, y: size.height / CGFloat(max(1, d.height)))
+        return soft.transformed(by: t).cropped(to: CGRect(origin: .zero, size: size))
     }
 
     /// `input` disc-blurred by `radius` pixels, worked at a fraction of its size (a blur hides the
@@ -255,10 +257,15 @@ enum LensBlurRenderer {
         return b.outputImage?.cropped(to: input.extent)
     }
 
-    /// A picture of the viewer with the blur.
-    static func apply(_ image: CGImage, depth: DepthMap, _ s: LensBlurState, reference: CGFloat? = nil) -> CGImage? {
-        let input = CIImage(cgImage: image)
-        guard let out = blurred(input, depth: depth, s, reference: reference) else { return nil }
+    /// A picture of the viewer with the blur; `scale` < 1 makes a smaller one (while a finger moves).
+    static func apply(_ image: CGImage, depth: DepthMap, _ s: LensBlurState, reference: CGFloat? = nil, scale: CGFloat = 1) -> CGImage? {
+        var input = CIImage(cgImage: image)
+        var ref = reference
+        if scale < 1 {
+            input = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+            ref = (reference ?? CGFloat(max(image.width, image.height))) * scale
+        }
+        guard let out = blurred(input, depth: depth, s, reference: ref) else { return nil }
         let space = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         return context.createCGImage(out, from: input.extent, format: .RGBA8, colorSpace: space)
     }

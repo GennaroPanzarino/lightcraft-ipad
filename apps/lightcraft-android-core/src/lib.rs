@@ -145,12 +145,42 @@ impl Core {
     }
 
     /// One window of the photo as the viewer would draw it whole at `full_w × full_h` (a zoomed-in
-    /// view: only what is on screen, at the screen's resolution).
+    /// view: only what is on screen, at the screen's resolution). Never past the photo's own
+    /// pixels: zoomed in further, the window is developed at 100 % and the screen enlarges it (more
+    /// pixels would show nothing new and cost time and memory). The result says the window and the
+    /// whole size it was developed at (`window`: x, y, w, h; `full`: w, h).
     #[allow(clippy::too_many_arguments)]
     pub fn render_region(&mut self, id: u64, full_w: usize, full_h: usize, x: usize, y: usize, w: usize, h: usize, out: &mut [u8]) -> Result<Value, String> {
         let t0 = Instant::now();
-        let window = lightcraft_pipeline::PixelWindow { x, y, w: w.max(1), h: h.max(1) };
-        let job = self.session.region_job(PhotoId(id), full_w.max(8), full_h.max(8), window, true).ok_or("region not available")?;
+        let photo = PhotoId(id);
+        let (mut fw, mut fh, mut x, mut y, mut w, mut h) = (full_w.max(8), full_h.max(8), x, y, w.max(1), h.max(1));
+        if let (Some(p), Some(d)) = (self.session.catalog.photo(photo), self.session.develop_of(photo)) {
+            let frame = lightcraft_pipeline::geometry::Frame::with_lens(p.width.max(1) as usize, p.height.max(1) as usize, &d, true, p.embedded_lens.as_ref());
+            let (nw, _) = frame.native_size();
+            let k = nw / fw as f64;
+            if k.is_finite() && k > 0.0 && k < 1.0 {
+                let (x1, y1) = (((x + w) as f64 * k).ceil() as usize, ((y + h) as f64 * k).ceil() as usize);
+                (fw, fh) = (((fw as f64 * k).round() as usize).max(8), ((fh as f64 * k).round() as usize).max(8));
+                (x, y) = (((x as f64 * k).floor() as usize).min(fw - 1), ((y as f64 * k).floor() as usize).min(fh - 1));
+                (w, h) = (x1.min(fw).saturating_sub(x).max(1), y1.min(fh).saturating_sub(y).max(1));
+            }
+        }
+        let window = lightcraft_pipeline::PixelWindow { x, y, w, h };
+        let job = self.session.region_job(photo, fw, fh, window, true).ok_or("region not available")?;
+        let mut r = self.run_into(job, out, t0)?;
+        r["window"] = json!([x, y, w, h]);
+        r["full"] = json!([fw, fh]);
+        Ok(r)
+    }
+
+    /// Where layer `mask` acts, white on black, fitted into `max_w × max_h` (the red overlay the
+    /// app draws while a layer is painted or shaped). A draft: the mask, not the photo, matters.
+    pub fn render_mask(&mut self, id: u64, mask: u64, max_w: usize, max_h: usize, out: &mut [u8]) -> Result<Value, String> {
+        use lightcraft_pipeline::{MaskView, Overlay};
+        let t0 = Instant::now();
+        let job = self.session.loupe_job(PhotoId(id), max_w.max(8), max_h.max(8), true).ok_or("no such photo")?;
+        let overlay = Overlay::Mask { id: mask.min(u64::from(u16::MAX)) as u16, view: MaskView::WhiteOnBlack, color: [255, 255, 255], opacity: 100 };
+        let job = job.draft().with_overlay(overlay);
         self.run_into(job, out, t0)
     }
 

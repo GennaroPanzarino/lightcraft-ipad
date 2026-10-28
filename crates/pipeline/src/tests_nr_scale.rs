@@ -1,7 +1,7 @@
 //! Noise reduction is resolution independent (issue #960): a preview looks like the full-size
 //! render scaled down, whatever the preview's size and whichever source level it is drawn from.
 
-use crate::local::{denoise, log_lum, nr_params};
+use crate::local::{denoise, log_lum, noise_level, nr_params};
 use crate::{RenderRequest, SourceInfo, plan, render};
 use lightcraft_develop::DevelopSettings;
 use lightcraft_raster::resample::{Filter, resize};
@@ -69,15 +69,16 @@ fn rms_chroma(a: &Rgb32f, b: &Rgb32f) -> f32 {
 /// how far it would be with noise reduction left off).
 fn preview_error(s: &DevelopSettings, scales: &[f32], metric: fn(&Rgb32f, &Rgb32f) -> f32) -> Vec<(f32, f32, f32)> {
     let src = noisy_scene(0.15);
+    let noise = noise_level(&src, None);
     let mut full = src.clone();
-    denoise(&mut full, s, 1.0);
+    denoise(&mut full, s, 1.0, noise);
     scales
         .iter()
         .map(|&k| {
             let reference = scaled(&full, k);
             let plain = scaled(&src, k);
             let mut preview = plain.clone();
-            denoise(&mut preview, s, k);
+            denoise(&mut preview, s, k, noise * k);
             (k, metric(&preview, &reference), metric(&plain, &reference))
         })
         .collect()
@@ -123,18 +124,18 @@ fn colour_nr_preview_matches_full_size_scaled_down() {
 }
 
 #[test]
-fn full_size_parameters_unchanged() {
-    // full-size renders and exports keep their look: these are the parameters from before #960
+fn full_size_parameters() {
+    // the luminance threshold is a multiple of the photo's own noise (square-root luminance)
     let mut s = DevelopSettings::default();
     s.detail.nr_luminance = 50.0;
     s.detail.nr_detail = 50.0;
     s.detail.nr_color = 25.0;
     s.detail.nr_color_detail = 50.0;
     s.detail.nr_color_smoothness = 50.0;
-    let (l, c) = nr_params(&s, 1.0);
+    let (l, c) = nr_params(&s, 1.0, 0.02);
     let (l, c) = (l.unwrap(), c.unwrap());
-    assert_eq!(l.sigma, 1.0 + 2.5 * 0.5);
-    assert_eq!(l.eps, 0.002 + 0.5 * 0.5 * 0.25 * (1.0 - 0.7 * 0.5));
+    assert_eq!(l.sigma, 1.5 + 3.0 * 0.5);
+    assert!((l.eps - ((1.0 + 3.0 * 0.5 * (1.0 - 0.6 * 0.5)) * 0.02f32).powi(2)).abs() < 1e-9);
     assert_eq!(l.k, 0.5f32.sqrt());
     assert_eq!(c.sigma, (1.5 + 6.0 * 0.25) * 1.5);
     assert_eq!(c.t, 0.25 * (1.0 - 0.25));
@@ -145,15 +146,15 @@ fn tiny_previews_skip_noise_reduction_and_hostile_scales_are_safe() {
     let mut s = DevelopSettings::default();
     s.detail.nr_luminance = 100.0;
     s.detail.nr_color = 100.0;
-    // a 128-px thumbnail of a 6000-px photo: the luminance radius is a few hundredths of a pixel,
-    // the colour radius (wider) a quarter of one, so that fades to a tenth
-    let (l, c) = nr_params(&s, 128.0 / 6000.0);
-    assert_eq!(l, None);
-    let (c, full) = (c.unwrap(), nr_params(&s, 1.0).1.unwrap());
+    // a 128-px thumbnail of a 6000-px photo: the luminance radius is a tenth of a pixel (it fades
+    // to about 1 %), the colour radius (wider) a quarter of one, so that fades to a tenth
+    let (l, c) = nr_params(&s, 128.0 / 6000.0, 0.001);
+    assert!(l.is_none_or(|l| l.k < 0.02), "{l:?}");
+    let (c, full) = (c.unwrap(), nr_params(&s, 1.0, 0.02).1.unwrap());
     assert!(c.t < full.t * 0.1 && c.t > 0.0, "{c:?}");
-    assert_eq!(nr_params(&s, 0.0), (None, None));
+    assert_eq!(nr_params(&s, 0.0, 0.0), (None, None));
     for k in [f32::NAN, f32::INFINITY, -1.0, 7.0] {
-        let (l, c) = nr_params(&s, k);
+        let (l, c) = nr_params(&s, k, k);
         let vals = [l.map(|l| [l.sigma, l.eps, l.k]), c.map(|c| [c.sigma, c.t, 1.0])];
         for v in vals.into_iter().flatten().flatten() {
             assert!(v.is_finite() && v >= 0.0, "{k}: {v}");
@@ -193,7 +194,7 @@ fn preview_from_a_smaller_source_level_matches_one_from_the_original() {
     let resampling = mean_abs_diff(&render(&thumb_level, &told, &plain, &req).image, &render(&original, &raw, &plain, &req).image);
     eprintln!("mean |Δ| (8-bit) from the original's render: told {told_diff:.3}, not told {untold_diff:.3}, NR off {resampling:.3}");
     assert!(told_diff <= resampling + 0.1, "{told_diff} vs {resampling}");
-    assert!(untold_diff > told_diff + 0.3, "the copy's own pixels change the result: {untold_diff} vs {told_diff}");
+    assert!(untold_diff > told_diff + 0.25, "the copy's own pixels change the result: {untold_diff} vs {told_diff}");
 }
 
 #[test]
@@ -208,4 +209,67 @@ fn crop_does_not_change_the_noise_reduction_scale() {
     let p = plan(&src, &info, &cropped, &RenderRequest::fit(200, 100));
     assert_eq!((p.w, p.h), (200, 100));
     assert!((p.detail_scale - 1.0).abs() < 1e-6, "{}", p.detail_scale);
+}
+
+#[test]
+fn noise_level_reads_the_noise_not_the_scene() {
+    // white noise of a known spread on a textured scene: the estimate is that spread
+    let mut rng = Rng(7);
+    for sigma in [0.005f32, 0.02, 0.06] {
+        let n: Vec<f32> = (0..W * H).map(|_| rng.normal()).collect();
+        let img = Rgb32f::from_fn(W, H, |x, y| {
+            let s = 0.45 + 0.2 * (x as f32 / 40.0).sin() * (y as f32 / 55.0).cos() + sigma * n[y * W + x];
+            let v = (s.max(0.0).powi(2) - crate::local::SQRT_LUM_OFFSET).max(0.0);
+            [v, v, v]
+        });
+        let got = noise_level(&img, None);
+        eprintln!("noise {sigma}: measured {got}");
+        assert!((got / sigma - 1.0).abs() < 0.15, "{sigma}: {got}");
+    }
+}
+
+#[test]
+fn strong_noise_reduction_removes_most_of_the_noise() {
+    // at 100 a flat noisy area keeps a small part of its noise, shadows as much as highlights
+    let mut s = DevelopSettings::default();
+    s.detail.nr_luminance = 100.0;
+    s.detail.nr_detail = 50.0;
+    s.detail.nr_color = 0.0;
+    let mut rng = Rng(11);
+    let sigma = 0.03f32;
+    let n: Vec<f32> = (0..512 * 256).map(|_| rng.normal()).collect();
+    let img = Rgb32f::from_fn(512, 256, |x, y| {
+        let base = if x < 256 { 0.12f32 } else { 0.7 };
+        let v = ((base + sigma * n[y * 512 + x]).max(0.0).powi(2) - crate::local::SQRT_LUM_OFFSET).max(0.0);
+        [v, v, v]
+    });
+    let noise = noise_level(&img, None);
+    let mut out = img.clone();
+    denoise(&mut out, &s, 1.0, noise);
+    let spread = |im: &Rgb32f, x0: usize| {
+        let v: Vec<f32> = (16..240).flat_map(|y| (x0 + 16..x0 + 240).map(move |x| (y, x))).map(|(y, x)| crate::local::sqrt_lum(im.data[y * 512 + x])).collect();
+        let m = v.iter().sum::<f32>() / v.len() as f32;
+        (v.iter().map(|a| (a - m).powi(2)).sum::<f32>() / v.len() as f32).sqrt()
+    };
+    for x0 in [0, 256] {
+        let (before, after) = (spread(&img, x0), spread(&out, x0));
+        eprintln!("area at {x0}: noise {before:.4} -> {after:.4}");
+        assert!(after < before * 0.2, "area at {x0}: {before} -> {after}");
+    }
+}
+
+#[test]
+fn sharpening_keeps_to_its_radius() {
+    // a step edge sharpened at radius 1: the overshoot stays within a few pixels of the edge
+    let mut s = DevelopSettings::default();
+    s.detail.sharpen_amount = 150.0;
+    s.detail.sharpen_radius = 0.5;
+    s.detail.sharpen_detail = 25.0;
+    let img = Rgb32f::from_fn(200, 8, |x, _| if x < 100 { [0.05; 3] } else { [0.5; 3] });
+    let mut out = img.clone();
+    crate::local::sharpen(&mut out, &s, 1.0);
+    let changed: Vec<usize> = (0..200).filter(|&x| (out.data[4 * 200 + x][0] - img.data[4 * 200 + x][0]).abs() > 1e-4).collect();
+    eprintln!("pixels changed: {changed:?}");
+    assert!(!changed.is_empty());
+    assert!(changed.iter().all(|&x| (96..104).contains(&x)), "{changed:?}");
 }

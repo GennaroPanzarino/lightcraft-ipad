@@ -17,6 +17,7 @@ char *lc_render_before(void *h, uint64_t photo, uint32_t w, uint32_t hh, uint8_t
 char *lc_thumb(void *h, uint64_t photo, uint32_t edge, uint8_t *buf, size_t cap);
 char *lc_render_region(void *h, uint64_t photo, uint32_t full_w, uint32_t full_h, uint32_t x, uint32_t y, uint32_t w, uint32_t hh, uint8_t *buf, size_t cap);
 char *lc_render_uncropped(void *h, uint64_t photo, uint32_t w, uint32_t hh, bool draft, uint8_t *buf, size_t cap);
+char *lc_render_mask(void *h, uint64_t photo, uint64_t mask, uint32_t w, uint32_t hh, uint8_t *buf, size_t cap);
 char *lc_render_variant(void *h, uint64_t photo, const char *preset, int32_t amount, uint32_t edge, uint8_t *buf, size_t cap);
 char *lc_export_jpeg(void *h, uint64_t photo, const char *path, int32_t quality, uint32_t long_edge);
 char *lc_export(void *h, uint64_t photo, const char *path, const char *params);

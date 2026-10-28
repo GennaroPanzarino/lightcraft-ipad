@@ -1,9 +1,10 @@
 import SwiftUI
 import UIKit
 
-/// Capture One's browser in grid view: the session's shots side by side, each with its name, rating,
-/// colour tag and flag. A tap opens a shot (it zooms out of its thumbnail); long press or Seleziona
-/// to select several; pinch to make the thumbnails bigger or smaller.
+/// Capture One's browser: the session's shots as tiles fitted together in rows (each photo whole,
+/// in its own proportions; every row as wide as the screen; hairline gaps), each with its name,
+/// rating, colour tag and flag over its foot. A tap opens a shot (it flies out of its tile); long
+/// press or Seleziona to select several; pinch to make the rows taller or lower.
 struct BrowserView: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var library: Library
@@ -50,30 +51,42 @@ struct BrowserView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
-                    ScrollView {
-                        LazyVGrid(columns: [GridItem(.adaptive(minimum: cell, maximum: cell * 1.5), spacing: 3)], spacing: 3) {
-                            ForEach(shots) { s in
-                                BrowserCell(shot: s, selected: model.selection.contains(s.key), current: s.key == model.current, multi: multi)
-                                    .overlay(GeometryReader { g in
-                                        Color.clear
-                                            .contentShape(Rectangle())
-                                            .onTapGesture { tap(s, frame: g.frame(in: .global)) }
-                                            .onLongPressGesture {
-                                                Haptics.tick()
-                                                multi = true
-                                                model.toggle(s.key)
+                    GeometryReader { geo in
+                        let rows = TileRow.rows(shots, width: geo.size.width - 2 * TileRow.gap, height: cell)
+                        ScrollViewReader { proxy in
+                            ScrollView {
+                                LazyVStack(spacing: TileRow.gap) {
+                                    ForEach(rows) { row in
+                                        HStack(spacing: TileRow.gap) {
+                                            ForEach(row.tiles) { t in
+                                                tile(t.shot)
+                                                    .frame(width: t.width, height: row.height)
                                             }
-                                    })
+                                        }
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .id(row.id)
+                                    }
+                                }
+                                .padding(TileRow.gap)
+                                .padding(.bottom, model.selection.isEmpty || !multi ? 0 : 50)
+                            }
+                            .onPreferenceChange(CurrentTile.self) { f in
+                                guard let f = f, let k = model.current else { return }
+                                model.tileFrame = (k, f)
+                                model.tileMeasures += 1
+                            }
+                            .onChange(of: model.hero?.id) { _ in
+                                // back from the viewer: the shot's tile in sight, for the photo to land in
+                                guard let h = model.hero, h.back, let row = rows.first(where: { $0.tiles.contains { $0.shot.key == h.key } }) else { return }
+                                proxy.scrollTo(row.id)
                             }
                         }
-                        .padding(3)
-                        .padding(.bottom, model.selection.isEmpty || !multi ? 0 : 50)
                     }
                     .simultaneousGesture(
                         MagnificationGesture()
                             .onChanged { m in
                                 if pinchFrom == nil { pinchFrom = cell }
-                                cell = max(110, min(420, (pinchFrom ?? cell) * m))
+                                cell = max(90, min(480, (pinchFrom ?? cell) * m))
                             }
                             .onEnded { _ in
                                 pinchFrom = nil
@@ -104,6 +117,23 @@ struct BrowserView: View {
         }
     }
 
+    /// One tile: the shot, what it does under a finger, and (the shot on screen) where it is.
+    private func tile(_ s: Shot) -> some View {
+        let current = s.key == model.current
+        return BrowserTile(shot: s, selected: model.selection.contains(s.key), current: current, multi: multi, hidden: model.hero?.key == s.key)
+            .overlay(GeometryReader { g in
+                Color.clear
+                    .contentShape(Rectangle())
+                    .preference(key: CurrentTile.self, value: current ? g.frame(in: .global) : nil)
+                    .onTapGesture { tap(s, frame: g.frame(in: .global)) }
+                    .onLongPressGesture(minimumDuration: 0.4) {
+                        Haptics.tick()
+                        multi = true
+                        model.toggle(s.key)
+                    }
+            })
+    }
+
     private func tap(_ s: Shot, frame: CGRect) {
         if multi {
             model.toggle(s.key)
@@ -112,9 +142,8 @@ struct BrowserView: View {
         }
         guard s.photo != 0 || s.thumb != nil else { return }
         model.selection = [s.key]
-        // the picture's place in the cell: where the zoom starts
-        let box = CGRect(x: frame.minX + 8, y: frame.minY + 8, width: frame.width - 16, height: frame.width * 3 / 4 - 12)
-        model.open(s.key, from: box)
+        // the tile is the picture: the photo flies out of it
+        model.open(s.key, from: frame)
     }
 
     private func bar(_ shots: [Shot]) -> some View {
@@ -198,70 +227,134 @@ struct BrowserView: View {
     }
 }
 
-/// One shot in the grid: the picture fitted in its box (never cropped, never spilling over the next)
-/// with its stars, tag and flag over its bottom edge, the name under it.
-private struct BrowserCell: View {
+/// Where the tile of the shot on screen is (the photo flies back into it).
+private struct CurrentTile: PreferenceKey {
+    static var defaultValue: CGRect?
+    static func reduce(value: inout CGRect?, nextValue: () -> CGRect?) {
+        if let v = nextValue() { value = v }
+    }
+}
+
+/// A row of tiles: the photos side by side at one height, as wide together as the screen (the last
+/// row keeps the height asked for and leaves the rest of its width empty).
+struct TileRow: Identifiable {
+    struct Tile: Identifiable {
+        let shot: Shot
+        var width: CGFloat
+        var id: String { shot.key }
+    }
+
+    let id: String
+    let height: CGFloat
+    let tiles: [Tile]
+
+    /// The hairline between tiles (and around them).
+    static let gap: CGFloat = 2
+
+    /// `shots` in rows `width` points wide, each as close to `height` as the photos allow: a row
+    /// takes the next photo only if that brings its height nearer to `height`.
+    static func rows(_ shots: [Shot], width: CGFloat, height: CGFloat) -> [TileRow] {
+        guard width > 10, height > 10 else { return [] }
+        let aspect = { (s: Shot) in CGFloat(max(0.3, min(4, s.aspect.isFinite && s.aspect > 0 ? s.aspect : 1.5))) }
+        var rows: [TileRow] = []
+        var cur: [Shot] = []
+        var sum: CGFloat = 0
+        func close(_ list: [Shot], _ sum: CGFloat, full: Bool) {
+            guard let first = list.first else { return }
+            let gaps = gap * CGFloat(list.count - 1)
+            let h = full ? (width - gaps) / sum : min(height, (width - gaps) / sum)
+            var tiles = list.map { Tile(shot: $0, width: (aspect($0) * h).rounded(.down)) }
+            // the rounding left over goes to the last tile: the row ends exactly at the edge
+            if full, let last = tiles.indices.last {
+                let used = tiles.dropLast().reduce(0) { $0 + $1.width } + gaps
+                tiles[last].width = max(1, width - used)
+            }
+            rows.append(TileRow(id: first.key, height: h.rounded(), tiles: tiles))
+        }
+        for s in shots {
+            let a = aspect(s)
+            let gaps = gap * CGFloat(cur.count)
+            if !cur.isEmpty, (sum + a) * height + gaps >= width {
+                // full with this one, or full enough without it: whichever height is nearer
+                let with = (width - gaps) / (sum + a)
+                let without = (width - gap * CGFloat(cur.count - 1)) / sum
+                if abs(log(without / height)) < abs(log(with / height)) {
+                    close(cur, sum, full: true)
+                    cur = [s]
+                    sum = a
+                } else {
+                    close(cur + [s], sum + a, full: true)
+                    cur = []
+                    sum = 0
+                }
+            } else {
+                cur.append(s)
+                sum += a
+            }
+        }
+        close(cur, sum, full: false)
+        return rows
+    }
+}
+
+/// One shot as a tile: the whole photo edge to edge, its name, stars, tag and flag over a soft
+/// shade at its foot. `hidden`: the photo is flying to or from the viewer (its place stays empty).
+private struct BrowserTile: View {
     let shot: Shot
     let selected: Bool
     let current: Bool
     let multi: Bool
+    let hidden: Bool
 
     var body: some View {
-        VStack(spacing: 0) {
-            Color.clear
-                .aspectRatio(4.0 / 3.0, contentMode: .fit)
-                .overlay(
-                    ZStack(alignment: .bottom) {
-                        if let t = shot.thumb {
-                            Image(decorative: t, scale: 1)
-                                .resizable()
-                                .aspectRatio(contentMode: .fit)
-                                .shadow(color: .black.opacity(0.5), radius: 3, y: 1)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        } else {
-                            Rectangle().fill(Lc.field)
-                        }
-                        if shot.stage == .arriving || shot.stage == .preview {
-                            ProgressRing(fraction: shot.progress, line: 2).frame(width: 26, height: 26)
-                                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        }
-                        if shot.rating > 0 || shot.label != nil || shot.flag != "none" {
-                            HStack(spacing: 4) {
-                                if let t = shot.label { Circle().fill(t.color).frame(width: 7, height: 7) }
-                                Stars(rating: shot.rating, size: 8)
-                                if shot.flag == "pick" { Image(systemName: "flag.fill").font(.system(size: 8)).foregroundColor(Lc.live) }
-                                if shot.flag == "reject" { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundColor(Lc.danger) }
-                            }
-                            .padding(.horizontal, 5)
-                            .frame(height: 15)
-                            .background(Color.black.opacity(0.6))
-                            .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
-                            .padding(.bottom, 4)
+        ZStack(alignment: .bottom) {
+            Lc.field
+            if let t = shot.thumb, !hidden {
+                Image(decorative: t, scale: 1)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fill)
+            }
+            if hidden {
+                Lc.viewer
+            } else {
+                if shot.stage == .arriving || shot.stage == .preview {
+                    ProgressRing(fraction: shot.progress, line: 2).frame(width: 26, height: 26)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+                VStack(spacing: 3) {
+                    if shot.rating > 0 || shot.label != nil || shot.flag != "none" {
+                        HStack(spacing: 4) {
+                            if let t = shot.label { Circle().fill(t.color).frame(width: 7, height: 7) }
+                            Stars(rating: shot.rating, size: 8)
+                            if shot.flag == "pick" { Image(systemName: "flag.fill").font(.system(size: 8)).foregroundColor(Lc.live) }
+                            if shot.flag == "reject" { Image(systemName: "xmark").font(.system(size: 8, weight: .bold)).foregroundColor(Lc.danger) }
                         }
                     }
-                    .padding(.horizontal, 8)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
-                )
-            Text(shot.name)
-                .font(Typo.caption)
-                .foregroundColor(selected ? Lc.text : Lc.text2)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .frame(maxWidth: .infinity)
+                    Text(shot.name)
+                        .font(Typo.caption)
+                        .foregroundColor(Color.white.opacity(selected ? 1 : 0.86))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
                 .padding(.horizontal, 6)
+                .padding(.top, 16)
                 .padding(.bottom, 5)
-        }
-        .background(selected ? Lc.pressed : Lc.panel)
-        .overlay(alignment: .topTrailing) {
-            if multi {
-                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 17))
-                    .foregroundColor(selected ? Lc.accent : Color.white.opacity(0.7))
-                    .padding(8)
+                .frame(maxWidth: .infinity)
+                .background(LinearGradient(colors: [Color.black.opacity(0), Color.black.opacity(0.55)], startPoint: .top, endPoint: .bottom))
             }
         }
-        .overlay(Rectangle().stroke(selected ? Lc.select : (current ? Lc.hairline2 : Color.clear), lineWidth: selected ? 1 : 0.5))
+        .clipped()
+        .overlay(alignment: .topTrailing) {
+            if multi && !hidden {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.system(size: 17))
+                    .foregroundColor(selected ? Lc.accent : Color.white.opacity(0.8))
+                    .shadow(color: .black.opacity(0.4), radius: 2)
+                    .padding(7)
+            }
+        }
+        .overlay(Rectangle().strokeBorder(selected ? Lc.select : (current ? Lc.hairline2 : Color.clear), lineWidth: selected ? 2 : 1))
     }
 }
 

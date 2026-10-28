@@ -291,7 +291,7 @@ pub fn guided_fast_step(sigma: f32) -> usize {
     (sigma / 3.0).floor().clamp(1.0, 16.0) as usize
 }
 
-/// Luminance noise reduction: guided filter of log luminance (`sigma` px, `eps`), blended by `k`.
+/// Luminance noise reduction: guided filter of [`sqrt_lum`] (`sigma` px, `eps`), blended by `k`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NrLum {
     pub sigma: f32,
@@ -331,19 +331,87 @@ fn nr_radius(sigma: f32) -> (f32, f32) {
     (NR_MIN_SIGMA, (sigma / made).powi(2).min(1.0))
 }
 
+/// Offset under the square root of [`sqrt_lum`]: the sensor's read noise, which would otherwise
+/// blow up in the deepest shadows (a generalized Anscombe transform).
+pub const SQRT_LUM_OFFSET: f32 = 0.0005;
+
+/// The plane luminance noise reduction and sharpening work on: the square root of luminance
+/// (plus [`SQRT_LUM_OFFSET`]). Shot noise, most of a raw's noise, spreads about as much at every
+/// brightness there, so one threshold fits shadows and highlights alike; in log luminance the
+/// shadows' noise is many times wider than the highlights' and passes for detail.
+#[inline]
+pub fn sqrt_lum(c: [f32; 3]) -> f32 {
+    (luminance_2020(c).max(0.0) + SQRT_LUM_OFFSET).sqrt()
+}
+
+/// The pixel `c` (luminance `y0`) scaled to the luminance whose [`sqrt_lum`] is `s1`. The gain is
+/// held to 16× (a black pixel among brighter ones takes their level, not a colour of its noise).
+#[inline]
+pub fn with_sqrt_lum(c: [f32; 3], y0: f32, s1: f32) -> [f32; 3] {
+    let y1 = (s1 * s1 - SQRT_LUM_OFFSET).max(0.0);
+    let g = (y1 / y0.max(1e-9)).min(16.0);
+    c.map(|v| v * g)
+}
+
+/// Lowest noise level noise reduction assumes, as a fraction of the picture's median
+/// [`sqrt_lum`]: a clean photo still smooths when the slider asks for it (relative, so a brighter
+/// or darker capture of the same scene is treated alike).
+pub const NOISE_FLOOR: f32 = 0.007;
+
+/// The noise of `src` (standard deviation of [`sqrt_lum`] at its own pixels, white-balanced by
+/// `wb`): the median of absolute second differences at a 2-px step over ~65 000 places. A median
+/// sees the noise of the smooth areas past edges and texture, and the 2-px step sees noise that
+/// demosaicing spread over neighbouring pixels (adjacent differences would miss it).
+pub fn noise_level(src: &Rgb32f, wb: Option<&[[f32; 3]; 3]>) -> f32 {
+    let (w, h) = (src.width, src.height);
+    if w < 8 || h < 8 {
+        return 0.003;
+    }
+    let lum = |x: usize, y: usize| {
+        let c = src.data[y * w + x];
+        let c = match wb {
+            Some(m) => [0, 1, 2].map(|r| (m[r][0] * c[0] + m[r][1] * c[1] + m[r][2] * c[2]).max(0.0)),
+            None => c,
+        };
+        sqrt_lum(c)
+    };
+    let (rows, cols) = (256.min(h - 4), 256.min(w - 4));
+    let mut d = Vec::with_capacity(rows * cols);
+    let mut level = Vec::with_capacity(rows * cols);
+    for i in 0..rows {
+        let y = 2 + i * (h - 4) / rows;
+        for j in 0..cols {
+            let x = 2 + j * (w - 4) / cols;
+            let s = lum(x, y);
+            d.push((lum(x - 2, y) - 2.0 * s + lum(x + 2, y)).abs());
+            level.push(s);
+        }
+    }
+    let mid = d.len() / 2;
+    let m = *d.select_nth_unstable_by(mid, f32::total_cmp).1;
+    let floor = NOISE_FLOOR * *level.select_nth_unstable_by(mid, f32::total_cmp).1;
+    // a second difference of white noise has 6× its variance; MAD → σ is 1.4826
+    let sigma = 1.4826 * m / 6f32.sqrt();
+    if sigma.is_finite() { sigma.max(floor) } else { floor }
+}
+
 /// Noise-reduction parameters at `scale` output pixels per pixel of the original
-/// ([`crate::Plan::detail_scale`]; see [`denoise`]). Noise lives at the original's pixels, so the
-/// radii are the full-size radii times `scale`, and the guided filter's `eps` (the variance it
-/// treats as noise) follows the noise variance, which averaging `1/scale × 1/scale` pixels into one
-/// multiplies by `scale²`. A radius below [`NR_MIN_SIGMA`] fades instead ([`nr_radius`]): previews look like
-/// the full-size render scaled down (issue #960). At `scale` 1 these are the full-size parameters.
-pub fn nr_params(s: &DevelopSettings, scale: f32) -> (Option<NrLum>, Option<NrColor>) {
+/// ([`crate::Plan::detail_scale`]; see [`denoise`]), for a picture whose noise is `noise` at its
+/// own pixels ([`crate::Plan::noise`]). Noise lives at the original's pixels, so the radii are the
+/// full-size radii times `scale`; the guided filter's `eps` (the variance it treats as noise) is a
+/// multiple of the noise's variance, so the slider means the same on a clean ISO 100 frame and a
+/// noisy ISO 12 800 one (at 100 everything below about four times the noise goes). A radius below
+/// [`NR_MIN_SIGMA`] fades instead ([`nr_radius`]): previews look like the full-size render scaled
+/// down (issue #960).
+pub fn nr_params(s: &DevelopSettings, scale: f32, noise: f32) -> (Option<NrLum>, Option<NrColor>) {
     let lum = (s.detail.nr_luminance / 100.0) as f32;
     let col = (s.detail.nr_color / 100.0) as f32;
     let scale = if scale.is_finite() { scale.clamp(0.0, 1.0) } else { 1.0 };
-    let l = (lum > 0.0).then(|| nr_radius((1.0 + 2.5 * lum) * scale)).filter(|&(_, w)| w >= NR_MIN_BLEND).map(|(sigma, w)| {
+    let noise = if noise.is_finite() { noise.clamp(0.0, 1.0) } else { 0.003 };
+    let l = (lum > 0.0).then(|| nr_radius((1.5 + 3.0 * lum) * scale)).filter(|&(_, w)| w >= NR_MIN_BLEND).map(|(sigma, w)| {
         let detail = (s.detail.nr_detail / 100.0) as f32;
-        let eps = ((0.002 + lum * lum * 0.25 * (1.0 - 0.7 * detail)) * scale * scale).max(1e-7);
+        let t = 1.0 + 3.0 * lum * (1.0 - 0.6 * detail);
+        let eps = (t * noise).powi(2).max(1e-9);
         NrLum { sigma, eps, k: lum.sqrt() * w }
     });
     let smooth = 1.0 + (s.detail.nr_color_smoothness / 100.0) as f32;
@@ -355,10 +423,10 @@ pub fn nr_params(s: &DevelopSettings, scale: f32) -> (Option<NrLum>, Option<NrCo
 }
 
 /// Noise reduction at output resolution: luminance via an edge-aware self-guided filter on
-/// log-luminance, colour by blurring chromaticity (rgb / Y) and re-applying the original luminance.
-/// `scale`: output pixels per pixel of the original ([`nr_params`]).
-pub fn denoise(img: &mut Rgb32f, s: &DevelopSettings, scale: f32) {
-    let (lum, col) = nr_params(s, scale);
+/// [`sqrt_lum`], colour by blurring chromaticity (rgb / Y) and re-applying the original luminance.
+/// `scale`: output pixels per pixel of the original, `noise` the picture's own ([`nr_params`]).
+pub fn denoise(img: &mut Rgb32f, s: &DevelopSettings, scale: f32, noise: f32) {
+    let (lum, col) = nr_params(s, scale, noise);
     apply_nr(img, lum, col);
 }
 
@@ -367,14 +435,13 @@ pub fn apply_nr(img: &mut Rgb32f, lum: Option<NrLum>, col: Option<NrColor>) {
     let w = img.width;
     if let Some(nr) = lum {
         let _t = crate::profiling().then(std::time::Instant::now);
-        let l = img.map(log_lum);
+        let l = img.map(sqrt_lum);
         let f = guided(&l, nr.sigma, nr.eps);
         for_rows(&mut img.data, w, |y, row| {
             for (x, p) in row.iter_mut().enumerate() {
                 let i = y * w + x;
-                let d = (f.data[i] - l.data[i]) * nr.k;
-                let g = d.exp2();
-                *p = p.map(|v| v * g);
+                let s1 = l.data[i] + (f.data[i] - l.data[i]) * nr.k;
+                *p = with_sqrt_lum(*p, luminance_2020(*p), s1);
             }
         });
         if let Some(t) = _t {
@@ -401,6 +468,70 @@ pub fn apply_nr(img: &mut Rgb32f, lum: Option<NrLum>, col: Option<NrColor>) {
             eprintln!("    nr colour: {:.1} ms", t.elapsed().as_secs_f64() * 1e3);
         }
     }
+}
+
+/// Sharpening (Lightroom's Detail panel): an unsharp mask of [`sqrt_lum`] with a blur of `sigma`
+/// px, `k` times the difference added back. The difference, relative to the blur (so a brighter
+/// capture sharpens alike), is soft-limited to `clip` (the Detail slider: low values keep strong
+/// edges from ringing into halos), and where it is under `edge` (the Masking slider) it fades out,
+/// so flat areas and their noise stay as they are.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sharp {
+    pub sigma: f32,
+    pub k: f32,
+    pub clip: f32,
+    pub edge: f32,
+}
+
+/// Smallest blur (px) sharpening uses: below it the radius is kept and the amount fades instead.
+const SHARP_MIN_SIGMA: f32 = 0.6;
+
+/// Sharpening at `scale` output pixels per pixel of the original ([`crate::Plan::detail_scale`]):
+/// the Radius slider is in the original's pixels (0.5…3), so a preview sharpens what the full-size
+/// render sharpens, scaled down, and never the wide band that rings around edges.
+pub fn sharp_params(s: &DevelopSettings, scale: f32) -> Option<Sharp> {
+    let d = &s.detail;
+    let amount = (d.sharpen_amount / 150.0).clamp(0.0, 1.0) as f32;
+    if amount <= 0.0 {
+        return None;
+    }
+    let scale = if scale.is_finite() { scale.clamp(0.0, 1.0) } else { 1.0 };
+    let r = d.sharpen_radius.clamp(0.5, 3.0) as f32 * scale;
+    let (sigma, w) = if r >= SHARP_MIN_SIGMA { (r, 1.0) } else { (SHARP_MIN_SIGMA, r / SHARP_MIN_SIGMA) };
+    if w < 0.05 {
+        return None;
+    }
+    let detail = (d.sharpen_detail / 100.0).clamp(0.0, 1.0) as f32;
+    let masking = (d.sharpen_masking / 100.0).clamp(0.0, 1.0) as f32;
+    Some(Sharp { sigma, k: amount * 2.4 * w, clip: 0.025 + 0.1 * detail + 0.7 * detail * detail, edge: 0.1 * masking })
+}
+
+/// The sharpening of `sh` applied to a pixel `c` whose [`sqrt_lum`] is `s0` and blurred `sb`.
+#[inline]
+pub fn sharp_pixel(c: [f32; 3], s0: f32, sb: f32, sh: &Sharp) -> [f32; 3] {
+    let r = (s0 - sb) / sb.max(1e-4);
+    let m = if sh.edge > 0.0 { smooth(sh.edge, sh.edge * 2.0 + 0.005, r.abs()) } else { 1.0 };
+    let s1 = s0 + sb * sh.k * sh.clip * (r / sh.clip).tanh() * m;
+    with_sqrt_lum(c, luminance_2020(c), s1)
+}
+
+fn smooth(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Sharpening at output resolution, after noise reduction (see [`sharp_params`]).
+pub fn sharpen(img: &mut Rgb32f, s: &DevelopSettings, scale: f32) {
+    let Some(sh) = sharp_params(s, scale) else { return };
+    let w = img.width;
+    let l = img.map(sqrt_lum);
+    let b = gaussian(&l, sh.sigma);
+    for_rows(&mut img.data, w, |y, row| {
+        for (x, p) in row.iter_mut().enumerate() {
+            let i = y * w + x;
+            *p = sharp_pixel(*p, l.data[i], b.data[i], &sh);
+        }
+    });
 }
 
 pub fn log_lum(c: [f32; 3]) -> f32 {
@@ -505,9 +636,9 @@ pub fn plane_sigmas(s: &DevelopSettings, px_per_long: f64, q: Quality) -> PlaneS
         if q == Quality::Draft { sigma.min(24.0) } else { sigma }
     });
     let clarity = (s.effects.clarity != 0.0 || local_any(|a| a.clarity)).then(|| (0.012 * ppl).max(1.0));
-    // local Noise and Defringe read the fine detail band too
+    // local Noise and Defringe read the fine detail band too (the Detail panel's sharpening has
+    // its own radius: [`sharpen`])
     let texture = (s.effects.texture != 0.0
-        || s.detail.sharpen_amount != 0.0
         || local_any(|a| a.texture)
         || local_any(|a| a.sharpness)
         || local_any(|a| a.noise)
@@ -760,7 +891,8 @@ mod nr_tests {
         let (v0, m0) = var(&img);
         let mut s = DevelopSettings::default();
         s.detail.nr_luminance = 80.0;
-        denoise(&mut img, &s, 1.0);
+        let noise = noise_level(&img, None);
+        denoise(&mut img, &s, 1.0, noise);
         let (v1, m1) = var(&img);
         assert!(v1 < v0 * 0.5, "{v0} -> {v1}");
         assert!((m1 - m0).abs() < 0.01);

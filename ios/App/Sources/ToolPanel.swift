@@ -207,6 +207,8 @@ struct ToolPanel: View {
                 }
                 ToggleRow(label: "Aberrazione cromatica", on: ed.removeCA) { ed.merge(["optics": ["remove_ca": $0]], label: "Aberrazione cromatica") }
                 Sliders(store: s, ids: ["optics.distortion", "optics.vignetting", "optics.vignettingMidpoint"])
+                // the corrected photo's curved edges stay outside the crop
+                ToggleRow(label: "Vincola ritaglio", on: ed.constrainCrop) { ed.setConstrainCrop($0) }
             }
             ToolBox(id: "lensBlur", title: "Sfocatura obiettivo", state: state) { LensBlurTool(ed: ed) }
             ToolBox(id: "fringe", title: "Frange colorate", state: state) {
@@ -859,6 +861,7 @@ private struct LayersTool: View {
             }
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             if let m = selected {
+                ToggleRow(label: "Mostra la maschera in rosso", on: ed.maskOverlay) { ed.maskOverlay = $0 }
                 shapeControls(m)
                 Segment(options: pages.map(\.0), selected: page) { page = $0 }
                     .padding(.top, 8)
@@ -987,7 +990,7 @@ private struct SpotTool: View {
                 ed.cursorTool = ed.cursorTool == .spot ? .none : .spot
             }
             HStack(spacing: 6) {
-                FlatButton(title: "Trova polvere", icon: "sparkle.magnifyingglass") { ed.run("spot.findDust") }
+                FlatButton(title: "Trova polvere", icon: "sparkle.magnifyingglass", enabled: ed.working == nil) { ed.run("spot.findDust") }
                 FlatButton(title: "Togli l'ultima", icon: "arrow.uturn.backward", enabled: !ed.spots.isEmpty) { ed.deleteSpot(ed.spots.count - 1) }
             }
             Text(ed.spots.isEmpty ? "Nessuna macchia" : (ed.spots.count == 1 ? "1 macchia corretta" : "\(ed.spots.count) macchie corrette"))

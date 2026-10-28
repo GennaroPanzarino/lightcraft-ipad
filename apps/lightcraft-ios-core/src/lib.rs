@@ -171,6 +171,17 @@ pub unsafe extern "C" fn lc_render_region(h: *mut c_void, photo: u64, full_w: u3
     with_core(h, move |c| c.render_region(photo, full_w as usize, full_h as usize, x as usize, y as usize, w as usize, hh as usize, b))
 }
 
+/// Where layer `mask` acts, white on black (the app's mask overlay).
+///
+/// # Safety
+/// As `lc_render`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lc_render_mask(h: *mut c_void, photo: u64, mask: u64, w: u32, hh: u32, buf: *mut u8, cap: usize) -> *mut c_char {
+    // SAFETY: as documented.
+    let b = unsafe { buffer(buf, cap) };
+    with_core(h, move |c| c.render_mask(photo, mask, w.max(1) as usize, hh.max(1) as usize, b))
+}
+
 /// The photo without its crop and straightening (the crop tool's picture).
 ///
 /// # Safety

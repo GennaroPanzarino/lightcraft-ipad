@@ -56,64 +56,108 @@ private struct WorkspaceBar: View {
     @ObservedObject var ed: EditorModel
     @Binding var before: CGImage?
     @Binding var export: Bool
+    /// The two groups of buttons and the bar, measured: the title gets the room between them.
+    @State private var left: CGFloat = 0
+    @State private var right: CGFloat = 0
+    @State private var total: CGFloat = 0
 
     var body: some View {
+        // the title stays in the middle of the bar, in what the wider side leaves of it
+        let room = max(0, total - 16 - 2 * max(left, right) - 20)
         ZStack {
-            HStack(spacing: 2) {
-                ToolIcon(icon: "house") { model.go(.browser) }
-                ToolIcon(icon: model.settings.toolsLeft ? "sidebar.left" : "sidebar.right", active: !model.toolsShown) {
-                    withAnimation(Motion.panel) { model.toolsShown.toggle() }
-                }
-                Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
-                ToolIcon(icon: "eyedropper", active: ed.picking, enabled: ed.photo != 0) {
-                    ed.cursorTool = ed.cursorTool == .crop ? .none : ed.cursorTool
-                    ed.picking.toggle()
-                }
-                ToolIcon(icon: "crop", active: ed.cursorTool == .crop, enabled: ed.photo != 0) {
-                    if ed.cursorTool == .crop { ed.exitCrop() } else { ed.enterCrop() }
-                }
-                ToolIcon(icon: "bandage", active: ed.cursorTool == .spot, enabled: ed.photo != 0) {
-                    ed.picking = false
-                    if ed.cursorTool == .crop { ed.exitCrop() }
-                    ed.cursorTool = ed.cursorTool == .spot ? .none : .spot
-                }
-                ToolIcon(icon: "paintbrush.pointed", active: ed.cursorTool == .paint, enabled: ed.photo != 0) {
-                    ed.picking = false
-                    if ed.cursorTool == .crop { ed.exitCrop() }
-                    if ed.cursorTool == .paint {
-                        ed.cursorTool = .none
-                    } else if let m = ed.masks.first(where: { $0.id == ed.selectedMask }), m.kind == "brush" {
-                        ed.cursorTool = .paint
-                    } else {
-                        ed.addMask("brush")
-                    }
-                }
-                BeforeButton(ed: ed, before: $before)
+            HStack(spacing: 0) {
+                leading.background(Measure(side: 0))
                 Spacer(minLength: 8)
-                ToolIcon(icon: "arrow.uturn.backward", enabled: ed.canUndo) { ed.undo() }
-                ToolIcon(icon: "arrow.uturn.forward", enabled: ed.canRedo) { ed.redo() }
-                Menu {
-                    Button(role: .destructive) { ed.reset() } label: { Label("Azzera tutte le regolazioni", systemImage: "arrow.counterclockwise") }
-                } label: {
-                    Image(systemName: "arrow.counterclockwise").font(.system(size: 17)).foregroundColor(ed.photo != 0 ? Lc.text : Lc.text3)
-                        .frame(width: 38, height: 38)
-                }
-                .disabled(ed.photo == 0)
-                ToolIcon(icon: "square.and.arrow.up", enabled: ed.photo != 0) { export = true }
-                Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
-                Button { model.openSettings = true } label: {
-                    LinkStatus(tether: model.tether, raw: model.settings.raw)
-                }
-                .buttonStyle(PressStyle())
+                trailing.background(Measure(side: 1))
             }
-            CurrentTitle(library: model.library, key: model.current)
-                .frame(maxWidth: 360)
+            if room > 40 {
+                CurrentTitle(library: model.library, key: model.current, room: room)
+                    .frame(width: room)
+            }
+        }
+        .onPreferenceChange(BarSides.self) { w in
+            left = w[0] ?? left
+            right = w[1] ?? right
         }
         .padding(.horizontal, 8)
         .frame(height: 48)
+        .background(GeometryReader { g in
+            Color.clear
+                .onAppear { total = g.size.width }
+                .onChange(of: g.size.width) { total = $0 }
+        })
         .padding(.top, windowControlsInset)
         .background(Lc.header)
         .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
+    }
+
+    private var leading: some View {
+        HStack(spacing: 2) {
+            ToolIcon(icon: "house") { model.goHome() }
+            ToolIcon(icon: model.settings.toolsLeft ? "sidebar.left" : "sidebar.right", active: !model.toolsShown) {
+                withAnimation(Motion.chrome) { model.toolsShown.toggle() }
+            }
+            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
+            ToolIcon(icon: "eyedropper", active: ed.picking, enabled: ed.photo != 0) {
+                ed.cursorTool = ed.cursorTool == .crop ? .none : ed.cursorTool
+                ed.picking.toggle()
+            }
+            ToolIcon(icon: "crop", active: ed.cursorTool == .crop, enabled: ed.photo != 0) {
+                if ed.cursorTool == .crop { ed.exitCrop() } else { ed.enterCrop() }
+            }
+            ToolIcon(icon: "bandage", active: ed.cursorTool == .spot, enabled: ed.photo != 0) {
+                ed.picking = false
+                if ed.cursorTool == .crop { ed.exitCrop() }
+                ed.cursorTool = ed.cursorTool == .spot ? .none : .spot
+            }
+            ToolIcon(icon: "paintbrush.pointed", active: ed.cursorTool == .paint, enabled: ed.photo != 0) {
+                ed.picking = false
+                if ed.cursorTool == .crop { ed.exitCrop() }
+                if ed.cursorTool == .paint {
+                    ed.cursorTool = .none
+                } else if let m = ed.masks.first(where: { $0.id == ed.selectedMask }), m.kind == "brush" {
+                    ed.cursorTool = .paint
+                } else {
+                    ed.addMask("brush")
+                }
+            }
+            BeforeButton(ed: ed, before: $before)
+        }
+    }
+
+    private var trailing: some View {
+        HStack(spacing: 2) {
+            ToolIcon(icon: "arrow.uturn.backward", enabled: ed.canUndo) { ed.undo() }
+            ToolIcon(icon: "arrow.uturn.forward", enabled: ed.canRedo) { ed.redo() }
+            Menu {
+                Button(role: .destructive) { ed.reset() } label: { Label("Azzera tutte le regolazioni", systemImage: "arrow.counterclockwise") }
+            } label: {
+                Image(systemName: "arrow.counterclockwise").font(.system(size: 17)).foregroundColor(ed.photo != 0 ? Lc.text : Lc.text3)
+                    .frame(width: 38, height: 38)
+            }
+            .disabled(ed.photo == 0)
+            ToolIcon(icon: "square.and.arrow.up", enabled: ed.photo != 0) { export = true }
+            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
+            Button { model.openSettings = true } label: {
+                LinkStatus(tether: model.tether, raw: model.settings.raw)
+            }
+            .buttonStyle(PressStyle())
+        }
+    }
+}
+
+/// The widths of the toolbar's two groups of buttons (0: leading, 1: trailing).
+private struct BarSides: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] = [:]
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue()) { $1 }
+    }
+}
+
+private struct Measure: View {
+    let side: Int
+    var body: some View {
+        GeometryReader { g in Color.clear.preference(key: BarSides.self, value: [side: g.size.width]) }
     }
 }
 
@@ -149,19 +193,23 @@ private struct BeforeButton: View {
     }
 }
 
-/// The photo's name and its rating (tap the stars to rate), in the middle of the toolbar.
+/// The photo's name and its rating (tap the stars to rate), in the middle of the toolbar, within
+/// `room` points (the name shortens, then the stars give way).
 private struct CurrentTitle: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var library: Library
     let key: String?
+    let room: CGFloat
 
     var body: some View {
         let shot = key.flatMap { library.shot($0) }
         HStack(spacing: 10) {
             if let t = shot?.label { Circle().fill(t.color).frame(width: 9, height: 9) }
-            Text(shot?.name ?? "LightCraft").font(Typo.labelStrong).foregroundColor(Lc.text).lineLimit(1)
-            if let s = shot, s.photo != 0 {
+            Text(shot?.name ?? "LightCraft").font(Typo.labelStrong).foregroundColor(Lc.text).lineLimit(1).truncationMode(.middle)
+                .layoutPriority(1)
+            if let s = shot, s.photo != 0, room >= 190 {
                 StarRating(rating: s.rating, size: 11, spacing: -4) { model.rate([s.key], $0) }
+                    .fixedSize()
             }
         }
     }
@@ -185,10 +233,13 @@ private struct ViewerArea: View {
                 if shots.isEmpty {
                     EmptyViewer(tether: model.tether)
                 } else {
-                    if ed.cursorTool == .crop {
+                    // the viewer stays (with its picture) under the crop tool, which takes its
+                    // place once the uncropped photo is ready
+                    let cropping = ed.cursorTool == .crop && ed.uncropped != nil
+                    ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before ?? (ed.showDepth ? ed.depthImage : nil),
+                               hidden: model.hero != nil || cropping)
+                    if cropping {
                         CropHost(ed: ed)
-                    } else {
-                        ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before ?? (ed.showDepth ? ed.depthImage : nil))
                     }
                     if let s = shot, s.stage == .arriving && s.thumb == nil && model.loupe.pics[s.key] == nil {
                         VStack(spacing: 10) {
@@ -210,6 +261,15 @@ private struct ViewerArea: View {
                     if ed.cursorTool == .crop {
                         CropBar(ed: ed)
                             .padding(.bottom, 14)
+                    } else if let w = ed.working {
+                        HStack(spacing: 8) {
+                            ProgressView().progressViewStyle(.circular).scaleEffect(0.7).frame(width: 16, height: 16)
+                            Text(w).font(Typo.labelStrong).foregroundColor(Lc.text)
+                        }
+                        .padding(.horizontal, 12).frame(height: 30)
+                        .background(Lc.raised.opacity(0.95))
+                        .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        .padding(.bottom, 12)
                     } else if ed.cursorTool == .spot || ed.cursorTool == .paint || ed.cursorTool == .shape || ed.cursorTool == .sample || ed.cursorTool == .focus {
                         Text(toolHint(ed.cursorTool))
                             .font(Typo.labelStrong).foregroundColor(Lc.text)
@@ -366,7 +426,7 @@ struct Filmstrip: View {
                 .coordinateSpace(name: "strip")
                 .onPreferenceChange(StripFrames.self) { f in if !scrubbing { frames = f } }
                 .gesture(
-                    LongPressGesture(minimumDuration: 0.22)
+                    LongPressGesture(minimumDuration: 0.12)
                         .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .named("strip")))
                         .onChanged { v in
                             guard case .second(true, let drag?) = v else { return }

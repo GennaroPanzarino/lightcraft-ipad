@@ -243,7 +243,9 @@ impl FinishParams {
             clar,
             tex,
             dehaze,
-            sharpen: (s.detail.sharpen_amount / 150.0) as f32,
+            // the Detail panel's sharpening is done before this stage, at its own radius
+            // (`local::sharpen`); only the local brushes' sharpness reads the texture band here
+            sharpen: 0.0,
             sharpen_mask: (s.detail.sharpen_masking / 100.0) as f32,
             air: air_pre * gain,
             air_pre,

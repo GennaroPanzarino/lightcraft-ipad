@@ -2,26 +2,57 @@ import SwiftUI
 import UIKit
 
 /// What sits on the photo while a cursor tool is on: the spots of the Remove tool, the stroke being
-/// painted (Apple Pencil pressure included), a gradient's guides and handles. It lives inside the
-/// viewer's image view, so it zooms and scrolls with the photo; one finger draws, two fingers still
-/// zoom and move the photo. Points go out in the image's own coordinates.
+/// painted (Apple Pencil pressure included), the selected layer's mask in red (Lightroom's overlay),
+/// a gradient's guides and handles. It lives inside the viewer's image view, so it zooms and
+/// scrolls with the photo; one finger draws, two fingers still zoom and move the photo. Points go
+/// out in the image's own coordinates.
 final class EditOverlay: UIView {
     var mode: CursorTool = .none {
         didSet {
             isUserInteractionEnabled = [.spot, .paint, .shape, .sample, .focus].contains(mode)
+            if mode != oldValue {
+                pendingSpots = []
+                if mode != .paint { painted = [] }
+            }
             redraw()
         }
     }
     var crop = CropState() { didSet { if crop != oldValue { redraw() } } }
-    var spots: [SpotInfo] = [] { didSet { if spots != oldValue { redraw() } } }
+    var spots: [SpotInfo] = [] {
+        didSet {
+            guard spots != oldValue else { return }
+            // the spot the engine now has replaces the circle drawn at the touch
+            pendingSpots = []
+            redraw()
+        }
+    }
     var maskInfo: MaskInfo? { didSet { if maskInfo != oldValue && dragging == nil { redraw() } } }
+    /// Where the selected layer acts, already in the overlay's red ([`tintedMask`]).
+    var maskImage: CGImage? {
+        didSet {
+            guard maskImage !== oldValue else { return }
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            maskTint.contents = maskImage
+            CATransaction.commit()
+            // the strokes painted are in it now
+            painted = []
+            redraw()
+        }
+    }
+    var showMask = false {
+        didSet { if showMask != oldValue { maskTint.isHidden = !showMask } }
+    }
     var brushSize: CGFloat = 0.03
     var spotSize: CGFloat = 0.015
-    var erasing = false { didSet { stroke.strokeColor = (erasing ? UIColor.white : Ux.accent).withAlphaComponent(0.45).cgColor } }
+    var erasing = false { didSet { stroke.strokeColor = (erasing ? EditOverlay.eraseColor : EditOverlay.maskColor).cgColor } }
+    static let maskColor = UIColor(red: 1, green: 0.16, blue: 0.16, alpha: 0.48)
+    static let eraseColor = UIColor(white: 1, alpha: 0.4)
     /// How far the photo is zoomed in (lines keep their width on screen).
     var zoom: CGFloat = 1 { didSet { if abs(zoom - oldValue) > 0.01 { redraw() } } }
 
     var onSpot: ((CGPoint) -> Void)?
+    var onStrokeBegin: (() -> Void)?
     var onStroke: (([CGPoint], [Float]) -> Void)?
     var onSample: ((CGPoint) -> Void)?
     /// A tap with the focus tool: where, in the picture on screen (0…1).
@@ -34,6 +65,14 @@ final class EditOverlay: UIView {
     private let stroke = CAShapeLayer()
     private let guides = CAShapeLayer()
     private let handles = CAShapeLayer()
+    /// The mask, in red.
+    private let maskTint = CALayer()
+    /// Strokes finished but not yet in the mask the engine draws (they stay on screen till then).
+    private let paintedLayer = CAShapeLayer()
+    private let erasedLayer = CAShapeLayer()
+    private var painted: [(path: CGPath, width: CGFloat, erase: Bool)] = []
+    /// Spots touched but not yet in the engine's list (image coordinates).
+    private var pendingSpots: [CGPoint] = []
     private var points: [CGPoint] = []
     private var pressure: [Float] = []
     private var downAt = CGPoint.zero
@@ -47,13 +86,17 @@ final class EditOverlay: UIView {
         super.init(frame: frame)
         backgroundColor = .clear
         isMultipleTouchEnabled = false
-        for l in [spotLayer, stroke, guides, handles] { layer.addSublayer(l) }
+        maskTint.isHidden = true
+        maskTint.contentsGravity = .resize
+        for l in [maskTint, paintedLayer, erasedLayer, spotLayer, stroke, guides, handles] { layer.addSublayer(l) }
         spotLayer.fillColor = UIColor.white.withAlphaComponent(0.08).cgColor
         spotLayer.strokeColor = UIColor.white.cgColor
         stroke.fillColor = UIColor.clear.cgColor
-        stroke.strokeColor = Ux.accent.withAlphaComponent(0.45).cgColor
+        stroke.strokeColor = EditOverlay.maskColor.cgColor
         stroke.lineCap = .round
         stroke.lineJoin = .round
+        paintedLayer.fillColor = EditOverlay.maskColor.cgColor
+        erasedLayer.fillColor = EditOverlay.eraseColor.cgColor
         guides.fillColor = UIColor.clear.cgColor
         guides.strokeColor = UIColor.white.withAlphaComponent(0.9).cgColor
         handles.fillColor = UIColor.white.cgColor
@@ -70,6 +113,10 @@ final class EditOverlay: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        maskTint.frame = bounds
+        CATransaction.commit()
         redraw()
     }
 
@@ -112,8 +159,21 @@ final class EditOverlay: UIView {
                 let r = max(4 / zoom, length(s.size))
                 sp.append(UIBezierPath(ovalIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)))
             }
+            for q in pendingSpots {
+                let c = toView(q)
+                let r = max(4 / zoom, length(spotSize))
+                sp.append(UIBezierPath(ovalIn: CGRect(x: c.x - r, y: c.y - r, width: 2 * r, height: 2 * r)))
+            }
         }
         spotLayer.path = sp.cgPath
+        // strokes on their way into the mask, each outlined at its own width
+        let paint = CGMutablePath(), erase = CGMutablePath()
+        for p in painted {
+            let outline = p.path.copy(strokingWithWidth: p.width, lineCap: .round, lineJoin: .round, miterLimit: 1)
+            if p.erase { erase.addPath(outline) } else { paint.addPath(outline) }
+        }
+        paintedLayer.path = paint
+        erasedLayer.path = erase
         // gradients
         let g = UIBezierPath()
         let h = UIBezierPath()
@@ -179,6 +239,7 @@ final class EditOverlay: UIView {
         case .paint:
             points = [p]
             pressure = [force(t)]
+            onStrokeBegin?()
             redraw()
         case .shape:
             grabHandle(at: p)
@@ -211,12 +272,19 @@ final class EditOverlay: UIView {
         case .paint:
             let pts = points.map(toImage)
             let pr = pressure
+            if let path = stroke.path, !pts.isEmpty { painted.append((path, stroke.lineWidth, erasing)) }
             points = []
             pressure = []
             redraw()
             if !pts.isEmpty { onStroke?(pts, pr) }
         case .spot:
-            if !moved { onSpot?(toImage(p)) }
+            if !moved {
+                let q = toImage(p)
+                pendingSpots.append(q)
+                redraw()
+                Haptics.tick()
+                onSpot?(q)
+            }
         case .sample:
             if !moved { onSample?(toImage(p)) }
         case .focus:
@@ -323,6 +391,26 @@ final class EditOverlay: UIView {
         redraw()
         onShape?(s)
     }
+}
+
+/// A layer's mask as the engine draws it (white on black) in the overlay's red: premultiplied,
+/// 48 % at most, so the photo shows through.
+func tintedMask(_ image: CGImage) -> CGImage? {
+    let w = image.width, h = image.height
+    guard w > 0, h > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+    else { return nil }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+    guard let base = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+    for i in 0..<(w * h) {
+        let a = UInt32(base[i * 4]) * 122 / 255
+        let gb = UInt8(a * 41 / 255)
+        base[i * 4] = UInt8(a)
+        base[i * 4 + 1] = gb
+        base[i * 4 + 2] = gb
+        base[i * 4 + 3] = UInt8(a)
+    }
+    return ctx.makeImage()
 }
 
 // MARK: - Crop

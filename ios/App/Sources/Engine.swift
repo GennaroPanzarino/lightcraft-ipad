@@ -94,7 +94,10 @@ final class Engine: @unchecked Sendable {
     }
 
     private func picture(_ json: String) throws -> Rendered {
-        let o = try parse(json)
+        try picture(object: parse(json))
+    }
+
+    private func picture(object o: [String: Any]) throws -> Rendered {
         let w = Int(int64(o["width"]))
         let h = Int(int64(o["height"]))
         guard w > 0, h > 0, w * h * 4 <= capacity else { throw EngineError(message: "immagine vuota") }
@@ -156,11 +159,28 @@ final class Engine: @unchecked Sendable {
         }
     }
 
-    /// One window (`x, y, w, h` pixels) of the photo as drawn whole at `fullW × fullH`.
-    func renderRegion(_ photo: Int64, fullW: Int, fullH: Int, x: Int, y: Int, w: Int, h: Int) async throws -> Rendered {
+    /// One window (`x, y, w, h` pixels) of the photo as drawn whole at `fullW × fullH`; past the
+    /// photo's own resolution the engine develops it at 100 %. `rect`: the window it developed,
+    /// 0…1 of the whole.
+    func renderRegion(_ photo: Int64, fullW: Int, fullH: Int, x: Int, y: Int, w: Int, h: Int) async throws -> (Rendered, CGRect) {
         try await run {
             self.room(w, h)
-            return try self.picture(self.take(lc_render_region(self.handle, UInt64(photo), UInt32(fullW), UInt32(fullH), UInt32(x), UInt32(y), UInt32(w), UInt32(h), self.buffer, self.capacity)))
+            let o = try self.parse(self.take(lc_render_region(self.handle, UInt64(photo), UInt32(fullW), UInt32(fullH), UInt32(x), UInt32(y), UInt32(w), UInt32(h), self.buffer, self.capacity)))
+            let r = try self.picture(object: o)
+            var rect = CGRect(x: CGFloat(x) / CGFloat(fullW), y: CGFloat(y) / CGFloat(fullH), width: CGFloat(w) / CGFloat(fullW), height: CGFloat(h) / CGFloat(fullH))
+            if let win = o["window"] as? [Any], win.count == 4, let full = o["full"] as? [Any], full.count == 2 {
+                let fw = CGFloat(max(1, double(full[0]))), fh = CGFloat(max(1, double(full[1])))
+                rect = CGRect(x: CGFloat(double(win[0])) / fw, y: CGFloat(double(win[1])) / fh, width: CGFloat(double(win[2])) / fw, height: CGFloat(double(win[3])) / fh)
+            }
+            return (r, rect)
+        }
+    }
+
+    /// Where layer `mask` acts, white on black, fitted into `w × h`.
+    func renderMask(_ photo: Int64, mask: Int, _ w: Int, _ h: Int) async throws -> Rendered {
+        try await run {
+            self.room(w, h)
+            return try self.picture(self.take(lc_render_mask(self.handle, UInt64(photo), UInt64(max(0, mask)), self.clamp(w), self.clamp(h), self.buffer, self.capacity)))
         }
     }
 

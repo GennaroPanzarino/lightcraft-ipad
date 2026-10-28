@@ -44,11 +44,37 @@ final class EditorModel: ObservableObject {
     @Published private(set) var variants: [String: CGImage] = [:]
     @Published private(set) var hasCopy = false
     /// What a touch on the photo does (Capture One's cursor tools).
-    @Published var cursorTool: CursorTool = .none
+    @Published var cursorTool: CursorTool = .none {
+        didSet {
+            guard cursorTool != oldValue else { return }
+            localAdjusting = false
+            if EditorModel.maskTools.contains(cursorTool) { refreshMask() }
+        }
+    }
+    /// The tools that draw a layer's mask: the mask shows in red while they are on.
+    static let maskTools: Set<CursorTool> = [.paint, .shape, .sample]
+    /// Where the selected layer acts (alpha only), for the red overlay.
+    @Published private(set) var maskImage: CGImage?
+    /// The red overlay while a layer is drawn (Lightroom's "Show overlay").
+    @Published var maskOverlay = true {
+        didSet { if maskOverlay && !oldValue { refreshMask() } }
+    }
+    /// A layer slider is moving: the overlay steps aside to show the effect.
+    @Published private(set) var localAdjusting = false
+    /// A heavy change on its way (removing a spot, painting a mask…): what, for the photo's hint.
+    @Published private(set) var working: String?
+    /// Lens Corrections' "Constrain Crop" (the crop stays inside the corrected photo).
+    @Published private(set) var constrainCrop = false
+    private var maskTask: Task<Void, Never>?
     @Published private(set) var crop = CropState()
     @Published private(set) var masks: [MaskInfo] = []
     @Published var selectedMask: Int? {
-        didSet { if selectedMask != oldValue { loadLocal() } }
+        didSet {
+            guard selectedMask != oldValue else { return }
+            loadLocal()
+            maskImage = nil
+            refreshMask()
+        }
     }
     @Published private(set) var spots: [SpotInfo] = []
     @Published var brushSize = 0.03
@@ -106,6 +132,9 @@ final class EditorModel: ObservableObject {
         case cropDrag(String, CGPoint, CGPoint, CGRect)
         case shape(Int, [String: Any])
         case stroke([CGPoint], [Float])
+        /// A setting kept with the photo that the engine does not draw (the lens blur): no new
+        /// picture, no new panel, only the history.
+        case quiet(String, [String: Any], String)
     }
 
     private var queue: [Op] = []
@@ -123,7 +152,10 @@ final class EditorModel: ObservableObject {
         store.onChange = { [weak self] id, v in self?.send(.values([id: v])) }
         store.onEnd = { [weak self] in self?.send(.end) }
         localStore.setControls(LocalControls.all)
-        localStore.onBegin = { [weak self] label in self?.send(.begin(label)) }
+        localStore.onBegin = { [weak self] label in
+            self?.localAdjusting = true
+            self?.send(.begin(label))
+        }
         localStore.onChange = { [weak self] id, v in self?.send(.local([id: v])) }
         localStore.onEnd = { [weak self] in self?.send(.end) }
     }
@@ -146,6 +178,8 @@ final class EditorModel: ObservableObject {
         cursorTool = .none
         uncropped = nil
         selectedMask = nil
+        maskImage = nil
+        working = nil
         masks = []
         spots = []
         depth = nil
@@ -212,13 +246,16 @@ final class EditorModel: ObservableObject {
         return await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, depth: part, state, reference: ref) }.value
     }
 
-    /// The lens blur into the photo's settings (one undo step).
+    /// The lens blur into the photo's settings (one undo step). The engine does not draw it, so
+    /// nothing is developed again: the blurred picture on screen already is the result.
     func commitLensBlur() {
         if let l = liveBlur {
             lensBlur = l
             liveBlur = nil
         }
-        merge(lensBlur.settings, label: "Sfocatura obiettivo")
+        send(.quiet("develop.merge", ["settings": lensBlur.settings, "label": "Sfocatura obiettivo"], "Sfocatura obiettivo"))
+        // the picture at full quality (a slider drag showed a lighter one)
+        scheduleBlur()
     }
 
     /// Focus where the photo was touched (0…1 of the picture on screen).
@@ -241,10 +278,13 @@ final class EditorModel: ObservableObject {
         blurBusy = true
         Breadcrumbs.mark("Sfocatura obiettivo")
         let state = liveBlur ?? lensBlur
+        // while a finger moves (a slider, a draft): half the pixels, a quarter of the work
+        let light = liveBlur != nil || p.draft
         let k = "\(photo)|\(crop.rect)|\(crop.angle)"
         Task {
+            let t0 = Date()
             if depth == nil || (depthKey != k && !p.draft) {
-                let small = scaled(p.image, edge: 1024)
+                let small = await Task.detached(priority: .userInitiated) { scaled(p.image, edge: 1024) }.value
                 let d = await DepthEstimator.shared.estimate(small)
                 if p.key == key {
                     depth = d
@@ -252,13 +292,16 @@ final class EditorModel: ObservableObject {
                     depthSource = DepthEstimator.shared.source
                     depthImage = d?.image.flatMap { stretched($0, width: max(1, p.image.width / 2), height: max(1, p.image.height / 2)) }
                 }
+                NSLog("lightcraft lensblur: depth \(Int(Date().timeIntervalSince(t0) * 1000)) ms (\(depthSource))")
             }
             var out = p
             if let d = depth, state.enabled {
                 let img = p.image
-                if let b = await Task.detached(priority: .userInitiated, operation: { LensBlurRenderer.apply(img, depth: d, state) }).value {
-                    out = Pic(key: p.key, photo: p.photo, revision: p.revision, boxW: p.boxW, boxH: p.boxH, image: b, draft: p.draft)
+                let t1 = Date()
+                if let b = await Task.detached(priority: .userInitiated, operation: { LensBlurRenderer.apply(img, depth: d, state, scale: light ? 0.5 : 1) }).value {
+                    out = Pic(key: p.key, photo: p.photo, revision: p.revision, boxW: p.boxW, boxH: p.boxH, image: b, draft: p.draft || light)
                 }
+                NSLog("lightcraft lensblur: blur \(Int(Date().timeIntervalSince(t1) * 1000)) ms\(light ? " (light)" : "")")
             }
             out.filtered = true
             if p.key == key { loupe.put(out) }
@@ -287,6 +330,37 @@ final class EditorModel: ObservableObject {
     func exitCrop() {
         cursorTool = .none
         uncropped = nil
+    }
+
+    /// Lens Corrections' "Constrain Crop" on or off (one undo step).
+    func setConstrainCrop(_ on: Bool) {
+        constrainCrop = on
+        merge(["geometry": ["constrain_crop": on]], label: "Vincola ritaglio")
+    }
+
+    /// A finger starts painting or shaping a layer: the overlay comes back.
+    func strokeBegan() {
+        localAdjusting = false
+    }
+
+    /// Whether the red overlay is on the photo now.
+    var maskOverlayShown: Bool {
+        maskOverlay && !localAdjusting && selectedMask != nil && EditorModel.maskTools.contains(cursorTool)
+    }
+
+    /// The selected layer's mask drawn again (after a stroke, a gradient moved, a colour sampled…),
+    /// while the overlay is wanted.
+    private func refreshMask() {
+        maskTask?.cancel()
+        guard let id = selectedMask, photo != 0, maskOverlay, EditorModel.maskTools.contains(cursorTool) else { return }
+        let p = photo
+        // half the viewer's size: a mask's edges are soft
+        let (w, h) = (max(64, viewport.w / 2), max(64, viewport.h / 2))
+        maskTask = Task {
+            guard let r = try? await engine.renderMask(p, mask: id, w, h), !Task.isCancelled, p == photo, selectedMask == id else { return }
+            let a = await Task.detached(priority: .userInitiated) { tintedMask(r.image) }.value
+            if !Task.isCancelled, p == photo, selectedMask == id { maskImage = a }
+        }
     }
 
     /// A crop handle dragged (`from`/`to` in the turned frame, `start` the crop when the drag began).
@@ -533,11 +607,39 @@ final class EditorModel: ObservableObject {
     private func perform(_ op: Op) async {
         let photo = self.photo
         guard photo != 0 else { return }
+        let started = Date()
+        let label: String
         switch op {
-        case .command(let name, _): Breadcrumbs.mark("Comando \(name)")
-        case .stroke: Breadcrumbs.mark("Pennello")
-        case .preset: Breadcrumbs.mark("Stile")
-        default: break
+        case .command(let name, _):
+            label = name
+            Breadcrumbs.mark("Comando \(name)")
+            switch name {
+            case "spot.add": working = "Rimuovo la macchia…"
+            case "spot.findDust": working = "Cerco la polvere sul sensore…"
+            case "spot.delete": working = "Tolgo la macchia…"
+            case let n where n.hasPrefix("mask."): working = "Aggiorno il livello…"
+            default: break
+            }
+        case .stroke:
+            label = "stroke"
+            Breadcrumbs.mark("Pennello")
+            working = "Applico la pennellata…"
+        case .preset:
+            label = "preset"
+            Breadcrumbs.mark("Stile")
+        case .begin: label = "begin"
+        case .end: label = "end"
+        case .values: label = "values"
+        case .curve: label = "curve"
+        case .create: label = "create"
+        case .local: label = "local"
+        case .cropDrag: label = "cropDrag"
+        case .shape: label = "shape"
+        case .quiet(let name, _, _): label = name
+        }
+        defer {
+            working = nil
+            NSLog("lightcraft op: \(label) \(Int(Date().timeIntervalSince(started) * 1000)) ms")
         }
         do {
             switch op {
@@ -675,6 +777,20 @@ final class EditorModel: ObservableObject {
                 }
                 await lock.unlock()
                 await after(nil)
+            case .quiet(let name, let params, _):
+                await lock.lock()
+                do {
+                    _ = try await engine.batch { e in
+                        _ = try e.execNow("library.select", ["ids": [photo], "active": photo])
+                        _ = try e.execNow(name, params)
+                    }
+                } catch {
+                    await lock.unlock()
+                    throw error
+                }
+                await lock.unlock()
+                base = nil
+                await loadHistory()
             case .create(let name, let groups, let done):
                 var id: String?
                 if let r = try? await engine.batch({ e -> Any? in
@@ -722,6 +838,7 @@ final class EditorModel: ObservableObject {
         }
         await loadState()
         await loadHistory()
+        refreshMask()
     }
 
     /// The photo's values and the rest of its settings, as LightCraft has them.
@@ -747,6 +864,7 @@ final class EditorModel: ObservableObject {
         lensProfile = (optics["lens_profile"] as? Bool) ?? false
         removeCA = (optics["remove_ca"] as? Bool) ?? false
         upright = (d["geometry"] as? [String: Any])?.str("upright") ?? "off"
+        constrainCrop = ((d["geometry"] as? [String: Any])?["constrain_crop"] as? Bool) ?? false
         vignetteStyle = (d["vignette"] as? [String: Any])?.str("style") ?? "highlightPriority"
         let aspect = (d["crop"] as? [String: Any])?["aspect"]
         if let a = aspect as? String {

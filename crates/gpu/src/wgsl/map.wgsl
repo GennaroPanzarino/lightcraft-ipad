@@ -133,15 +133,54 @@ fn wb_k(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw
     put_rgb(i, max(c * 1.0, vec3<f32>(0.0)));
 }
 
-// Luminance NR: scale by 2^((f − l)·k) (a: image, b: log luminance l, c: filtered f). P[1] = k.
+// `local::SQRT_LUM_OFFSET`.
+const SQRT_LUM_OFFSET: f32 = 0.0005;
+
+// `local::sqrt_lum` of an RGB image.
+@compute @workgroup_size(256)
+fn sqrt_lum_k(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+    let i = lin_index(g, nw);
+    if (i >= pu(0u)) {
+        return;
+    }
+    dst[i] = sqrt(max(lum2020(rgb_a(i)), 0.0) + SQRT_LUM_OFFSET);
+}
+
+// `local::with_sqrt_lum`: the pixel at the luminance whose sqrt_lum is s1.
+fn with_sqrt_lum(c0: vec3<f32>, s1: f32) -> vec3<f32> {
+    let y1 = max(s1 * s1 - SQRT_LUM_OFFSET, 0.0);
+    let gain = min(y1 / max(lum2020(c0), 1e-9), 16.0);
+    return c0 * gain;
+}
+
+// Luminance NR: towards the filtered sqrt luminance by k (a: image, b: sqrt_lum l, c: filtered f).
+// P[1] = k.
 @compute @workgroup_size(256)
 fn nr_lum(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
     let i = lin_index(g, nw);
     if (i >= pu(0u)) {
         return;
     }
-    let d = (c[i] - b[i]) * pf(1u);
-    put_rgb(i, rgb_a(i) * exp2(d));
+    let s1 = b[i] + (c[i] - b[i]) * pf(1u);
+    put_rgb(i, with_sqrt_lum(rgb_a(i), s1));
+}
+
+// `local::sharp_pixel` (a: image, b: sqrt_lum, c: its blur). P[1] = k, P[2] = clip, P[3] = edge.
+@compute @workgroup_size(256)
+fn sharp_k(@builtin(global_invocation_id) g: vec3<u32>, @builtin(num_workgroups) nw: vec3<u32>) {
+    let i = lin_index(g, nw);
+    if (i >= pu(0u)) {
+        return;
+    }
+    let r = (b[i] - c[i]) / max(c[i], 1e-4);
+    let edge = pf(3u);
+    var m = 1.0;
+    if (edge > 0.0) {
+        m = smoothstep(edge, edge * 2.0 + 0.005, abs(r));
+    }
+    let clip = pf(2u);
+    let s1 = b[i] + c[i] * pf(1u) * clip * tanh(r / clip) * m;
+    put_rgb(i, with_sqrt_lum(rgb_a(i), s1));
 }
 
 // Chromaticity rgb / Y.

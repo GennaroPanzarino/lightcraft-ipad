@@ -17,7 +17,7 @@ struct ConnectView: View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
                 if canGoBack {
-                    ToolIcon(icon: "chevron.left") { model.go(.workspace) }
+                    ToolIcon(icon: "chevron.left") { model.go(model.beforeConnect) }
                 }
                 Text("Collega la fotocamera").font(Typo.labelStrong).foregroundColor(Lc.text)
                 Spacer()

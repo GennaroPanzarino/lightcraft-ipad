@@ -83,6 +83,13 @@ enum UTypo {
 enum Motion {
     static let quick = Animation.easeOut(duration: 0.16)
     static let panel = Animation.spring(response: 0.28, dampingFraction: 0.94)
+    /// The toolbar and the tools coming and going with a tap on the photo: quick off the mark,
+    /// a soft landing, no bounce.
+    static let chrome = Animation.timingCurve(0.2, 0.85, 0.25, 1, duration: 0.3)
+    /// A photo flying between its tile and the viewer (a hint of give as it lands).
+    static let hero = Animation.spring(response: 0.42, dampingFraction: 0.86)
+    /// One screen dissolving into the other.
+    static let screen = Animation.easeInOut(duration: 0.22)
 }
 
 enum Haptics {

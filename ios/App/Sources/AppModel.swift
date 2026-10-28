@@ -43,11 +43,14 @@ struct ExportRecipe {
     }
 }
 
-/// A thumbnail opening into the viewer: the picture and where it starts from (screen points).
+/// A photo flying between its tile in the library and the viewer: the picture and where it starts
+/// from (screen points); `back`: from the viewer into the library.
 struct Hero: Identifiable {
     let id = UUID()
+    let key: String
     let image: CGImage
     let from: CGRect
+    let back: Bool
 }
 
 /// Everything the app holds: settings, the two LightCraft engines, the shots, the viewer, the editor
@@ -70,6 +73,12 @@ final class AppModel: ObservableObject {
     @Published var chrome = true
     @Published var openSettings = false
     @Published var hero: Hero?
+    /// The flight under way: the screen it leaves faded, the one it reaches shown.
+    @Published var heroFade = false
+    /// Where the tile of the shot on screen is in the library (screen points), and how many times it
+    /// was measured: a photo flying back lands there.
+    var tileFrame: (key: String, frame: CGRect)?
+    var tileMeasures = 0
     @Published private(set) var renderer = ""
     /// The app ended without leaving last time: what it was doing.
     @Published var lastEnd: String?
@@ -234,6 +243,17 @@ final class AppModel: ObservableObject {
         editor.commitLensBlur()
         await wait(2)
         log("lens blur ok (\(editor.depthSource))")
+        // far past 100 %: developed at the photo's own size, enlarged on screen
+        var deep = false
+        renderDetail(window: CGRect(x: 0.4, y: 0.4, width: 0.05, height: 0.05), full: CGSize(width: 48000, height: 32000)) { img, _ in
+            deep = true
+            NSLog("lightcraft stress: deep zoom \(img.width)x\(img.height)")
+        }
+        for _ in 0..<80 {
+            if deep { break }
+            await wait(0.1)
+        }
+        log("deep zoom \(deep ? "ok" : "none")")
         lb = editor.lensBlur
         lb.enabled = false
         editor.setLensBlur(lb, live: false)
@@ -344,6 +364,24 @@ final class AppModel: ObservableObject {
             editor.addSpot(CGPoint(x: 0.3, y: 0.4))
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             editor.addSpot(CGPoint(x: 0.6, y: 0.55))
+        case "paint":
+            // a brush layer painted: its mask shows in red
+            editor.addMask("brush")
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            editor.stroke((0..<60).map { CGPoint(x: 0.25 + Double($0) * 0.008, y: 0.45 + 0.1 * sin(Double($0) / 9)) }, pressure: [Float](repeating: 1, count: 60))
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            NSLog("lightcraft editor: mask overlay \(editor.maskImage != nil ? "shown" : "missing")")
+        case "cropdone":
+            // in and out of the crop tool: the photo must be back on screen
+            editor.enterCrop()
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            editor.exitCrop()
+        case "connectback":
+            go(.connect)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            go(beforeConnect)
+        case "home":
+            goHome()
         default: break
         }
     }
@@ -445,15 +483,50 @@ final class AppModel: ObservableObject {
         if let k = current { editor.open(k) } else { editor.close() }
     }
 
-    /// A shot from the browser into the viewer, zooming out of its thumbnail (`from`, screen points).
+    /// A shot from the library into the viewer, flying out of its tile (`from`, screen points).
     func open(_ key: String, from: CGRect?) {
         current = key
-        if let f = from, let img = loupe.pics[key]?.image ?? library.shot(key)?.thumb {
-            hero = Hero(image: img, from: f)
+        guard let f = from, let img = loupe.pics[key]?.image ?? library.shot(key)?.thumb else {
+            withAnimation(Motion.screen) { screen = .workspace }
+            return
         }
         var t = Transaction()
         t.disablesAnimations = true
-        withTransaction(t) { screen = .workspace }
+        withTransaction(t) {
+            heroFade = false
+            hero = Hero(key: key, image: img, from: f, back: false)
+            screen = .workspace
+        }
+    }
+
+    /// From the viewer back to the library, the photo flying into its tile.
+    func goHome() {
+        guard screen == .workspace else { return go(.browser) }
+        guard let k = current, let img = loupe.pics[k]?.image ?? library.shot(k)?.thumb, viewerFrame.width > 1 else {
+            return withAnimation(Motion.screen) { screen = .browser }
+        }
+        let a = CGFloat(img.width) / CGFloat(max(1, img.height))
+        let v = viewerFrame
+        let size = v.width / max(1, v.height) > a ? CGSize(width: v.height * a, height: v.height) : CGSize(width: v.width, height: v.width / a)
+        let from = CGRect(x: v.midX - size.width / 2, y: v.midY - size.height / 2, width: size.width, height: size.height)
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            heroFade = false
+            hero = Hero(key: k, image: img, from: from, back: true)
+            screen = .browser
+        }
+    }
+
+    /// The flight is over: the photo under it takes its place.
+    func heroLanded(_ id: UUID) {
+        guard hero?.id == id else { return }
+        var t = Transaction()
+        t.disablesAnimations = true
+        withTransaction(t) {
+            hero = nil
+            heroFade = false
+        }
     }
 
     /// The engine's caches: a share of what this process may still use before iPadOS stops it
@@ -488,11 +561,14 @@ final class AppModel: ObservableObject {
         let h = max(1, min(fh - y, Int((n.height * full.height).rounded(.up))))
         // a screen's worth at most (the window is what is on screen)
         guard w * h <= 3200 * 3200 else { return }
-        let rect = CGRect(x: CGFloat(x) / full.width, y: CGFloat(y) / full.height, width: CGFloat(w) / full.width, height: CGFloat(h) / full.height)
         Breadcrumbs.mark("Zoom \(w)×\(h) di \(fw)×\(fh)")
         Task {
-            guard let r = try? await engine.renderRegion(p, fullW: fw, fullH: fh, x: x, y: y, w: w, h: h), current == k else { return }
-            let img = await editor.blurDetail(r.image, window: rect, full: full) ?? r.image
+            let t0 = Date()
+            guard let (r, rect) = try? await engine.renderRegion(p, fullW: fw, fullH: fh, x: x, y: y, w: w, h: h), current == k else { return }
+            NSLog("lightcraft region: \(w)x\(h) of \(fw)x\(fh) -> \(r.image.width)x\(r.image.height) in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+            // the size the whole photo was developed at (100 % at most)
+            let drawn = CGSize(width: CGFloat(r.image.width) / max(rect.width, 1e-6), height: CGFloat(r.image.height) / max(rect.height, 1e-6))
+            let img = await editor.blurDetail(r.image, window: rect, full: drawn) ?? r.image
             if current == k { done(img, rect) }
         }
     }
@@ -512,8 +588,12 @@ final class AppModel: ObservableObject {
         if j >= 0 && j < list.count { current = list[j].key }
     }
 
+    /// The screen the camera's login was opened from (its back button returns there).
+    private(set) var beforeConnect: Screen = .browser
+
     func go(_ s: Screen) {
-        withAnimation(Motion.quick) { screen = s }
+        if s == .connect && screen != .connect { beforeConnect = screen }
+        withAnimation(Motion.screen) { screen = s }
     }
 
     func say(_ text: String) {

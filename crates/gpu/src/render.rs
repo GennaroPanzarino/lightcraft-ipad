@@ -818,15 +818,15 @@ fn linear(cx: &mut Cx<'_>, sampled: &Buf, info: &SourceInfo, plan: &Plan<'_>, ho
     denoise(cx, img, plan)
 }
 
-/// Noise reduction (`local::denoise`).
+/// Noise reduction (`local::denoise`), then sharpening (`local::sharpen`).
 fn denoise(cx: &mut Cx<'_>, img: Buf, plan: &Plan<'_>) -> Buf {
     let (w, h) = (plan.w, plan.h);
     let n = w * h;
-    let (lum, col) = local::nr_params(&plan.settings, plan.detail_scale);
+    let (lum, col) = local::nr_params(&plan.settings, plan.detail_scale, plan.noise);
     let mut img = img;
     if let Some(nr) = lum {
         let l = cx.gpu.buffer(n);
-        map(cx, "log_lum_k", n, &[], [Some(&img), None, None], &l);
+        map(cx, "sqrt_lum_k", n, &[], [Some(&img), None, None], &l);
         let f = guided(cx, &l, w, h, nr.sigma, nr.eps);
         let out = cx.gpu.buffer(n * 3);
         map(cx, "nr_lum", n, &[nr.k.to_bits()], [Some(&img), Some(&l), Some(&f)], &out);
@@ -838,6 +838,14 @@ fn denoise(cx: &mut Cx<'_>, img: Buf, plan: &Plan<'_>) -> Buf {
         let b = gaussian(cx, &chroma, w, h, 3, nr.sigma);
         let out = cx.gpu.buffer(n * 3);
         map(cx, "nr_col", n, &[nr.t.to_bits()], [Some(&img), Some(&chroma), Some(&b)], &out);
+        img = out;
+    }
+    if let Some(sh) = local::sharp_params(&plan.settings, plan.detail_scale) {
+        let l = cx.gpu.buffer(n);
+        map(cx, "sqrt_lum_k", n, &[], [Some(&img), None, None], &l);
+        let b = gaussian(cx, &l, w, h, 1, sh.sigma);
+        let out = cx.gpu.buffer(n * 3);
+        map(cx, "sharp_k", n, &[sh.k.to_bits(), sh.clip.to_bits(), sh.edge.to_bits()], [Some(&img), Some(&l), Some(&b)], &out);
         img = out;
     }
     img
