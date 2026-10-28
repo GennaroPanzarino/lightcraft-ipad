@@ -9,7 +9,6 @@ struct Workspace: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ed: EditorModel
     @State private var before: CGImage?
-    @State private var settingsOpen = false
     @State private var exportOpen = false
 
     var body: some View {
@@ -19,7 +18,7 @@ struct Workspace: View {
             let tools = model.toolsShown && model.chrome
             VStack(spacing: 0) {
                 if model.chrome {
-                    WorkspaceBar(ed: ed, before: $before, settings: $settingsOpen, export: $exportOpen)
+                    WorkspaceBar(ed: ed, before: $before, export: $exportOpen)
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 HStack(spacing: 0) {
@@ -41,7 +40,6 @@ struct Workspace: View {
             }
         }
         .background(Lc.window.ignoresSafeArea())
-        .sheet(isPresented: $settingsOpen) { SettingsSheet().environmentObject(model) }
         .sheet(isPresented: Binding(get: { exportOpen || (model.export != nil && model.screen == .workspace) }, set: { if !$0 { exportOpen = false; if model.export?.finished != false { model.export = nil } } })) {
             ExportSheet(keys: model.current.map { [$0] } ?? []) { exportOpen = false }.environmentObject(model)
         }
@@ -57,7 +55,6 @@ private struct WorkspaceBar: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ed: EditorModel
     @Binding var before: CGImage?
-    @Binding var settings: Bool
     @Binding var export: Bool
 
     var body: some View {
@@ -104,7 +101,7 @@ private struct WorkspaceBar: View {
                 .disabled(ed.photo == 0)
                 ToolIcon(icon: "square.and.arrow.up", enabled: ed.photo != 0) { export = true }
                 Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
-                Button { settings = true } label: {
+                Button { model.openSettings = true } label: {
                     LinkStatus(tether: model.tether, raw: model.settings.raw)
                 }
                 .buttonStyle(PressStyle())

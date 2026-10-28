@@ -67,6 +67,12 @@ final class Loupe {
 
     func forget(_ key: String) { pics[key] = nil }
 
+    /// Only the shot on screen kept (memory is short).
+    func trim() {
+        for k in Array(pics.keys) where k != viewerKey { pics[k] = nil }
+        order = order.filter { $0 == viewerKey }
+    }
+
     private func tag(_ w: Want) -> String { "\(w.key)/\(w.photo)/\(w.revision)/\(w.w)x\(w.h)" }
 
     private func satisfied(_ w: Want) -> Bool {

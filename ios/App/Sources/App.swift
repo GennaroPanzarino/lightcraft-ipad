@@ -48,6 +48,29 @@ struct RootView: View {
                 HeroZoom(hero: h) { if model.hero?.id == h.id { model.hero = nil } }
                     .id(h.id)
             }
+            if let e = model.lastEnd {
+                VStack {
+                    Spacer()
+                    HStack(alignment: .top, spacing: 12) {
+                        Image(systemName: "exclamationmark.triangle").foregroundColor(Lc.warn)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("L'app si è chiusa all'improvviso").font(Typo.labelStrong).foregroundColor(Lc.text)
+                            Text("Stava facendo: \(e)").font(Typo.caption).foregroundColor(Lc.text2).fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 8)
+                        Button("Copia") { UIPasteboard.general.string = "LightCraft · chiusura durante: \(e)" }
+                            .font(Typo.labelStrong).foregroundColor(Lc.accent)
+                        Button { model.lastEnd = nil } label: { Image(systemName: "xmark").foregroundColor(Lc.text3) }
+                    }
+                    .padding(14)
+                    .frame(maxWidth: 560)
+                    .background(Lc.raised)
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Lc.hairline2, lineWidth: 0.5))
+                    .shadow(color: .black.opacity(0.4), radius: 12, y: 4)
+                    .padding(.bottom, 90)
+                }
+            }
             if let n = model.note {
                 VStack {
                     Spacer()
@@ -59,7 +82,7 @@ struct RootView: View {
         .animation(Motion.quick, value: model.screen)
         .animation(Motion.quick, value: model.ready)
         .modifier(KeepAwake(tether: model.tether, on: model.settings.keepAwake))
-        .sheet(isPresented: $model.openSettings) { SettingsSheet().environmentObject(model) }
+        .overlay(SettingsSide(open: model.openSettings) { model.openSettings = false })
         .onAppear(perform: testLandscape)
     }
 
@@ -134,6 +157,30 @@ private struct HeroZoom: View {
         let a = s.width / max(1, s.height)
         let size = r.width / max(1, r.height) > a ? CGSize(width: r.height * a, height: r.height) : CGSize(width: r.width, height: r.width / a)
         return CGRect(x: r.midX - size.width / 2, y: r.midY - size.height / 2, width: size.width, height: size.height)
+    }
+}
+
+/// The settings sliding in from the left edge, the rest of the screen dimmed (a tap there closes).
+private struct SettingsSide: View {
+    let open: Bool
+    let close: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            if open {
+                Color.black.opacity(0.45)
+                    .ignoresSafeArea()
+                    .onTapGesture(perform: close)
+                    .transition(.opacity)
+                SettingsSheet(close: close)
+                    .frame(width: 400)
+                    .frame(maxHeight: .infinity)
+                    .shadow(color: .black.opacity(0.5), radius: 24, x: 6)
+                    .transition(.move(edge: .leading))
+                    .ignoresSafeArea(edges: .bottom)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: open)
     }
 }
 

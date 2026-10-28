@@ -239,6 +239,7 @@ final class EditorModel: ObservableObject {
         }
         guard let p = clean, p.key == key else { return }
         blurBusy = true
+        Breadcrumbs.mark("Sfocatura obiettivo")
         let state = liveBlur ?? lensBlur
         let k = "\(photo)|\(crop.rect)|\(crop.angle)"
         Task {
@@ -532,6 +533,12 @@ final class EditorModel: ObservableObject {
     private func perform(_ op: Op) async {
         let photo = self.photo
         guard photo != 0 else { return }
+        switch op {
+        case .command(let name, _): Breadcrumbs.mark("Comando \(name)")
+        case .stroke: Breadcrumbs.mark("Pennello")
+        case .preset: Breadcrumbs.mark("Stile")
+        default: break
+        }
         do {
             switch op {
             case .begin(let label):

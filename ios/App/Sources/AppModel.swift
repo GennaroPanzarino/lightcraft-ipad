@@ -1,5 +1,7 @@
 import Photos
 import SwiftUI
+import UIKit
+import os
 
 enum Screen { case connect, workspace, browser }
 
@@ -69,6 +71,8 @@ final class AppModel: ObservableObject {
     @Published var openSettings = false
     @Published var hero: Hero?
     @Published private(set) var renderer = ""
+    /// The app ended without leaving last time: what it was doing.
+    @Published var lastEnd: String?
     /// Where the viewer is on screen (the zoom of a thumbnail ends there), and how many times it was
     /// measured (the zoom waits for a fresh one).
     var viewerFrame: CGRect = .zero
@@ -100,6 +104,7 @@ final class AppModel: ObservableObject {
         loupe = Loupe(engine: engine)
         editor = EditorModel(engine: engine, loupe: loupe, library: library)
         if UserDefaults.standard.string(forKey: "screen") == "workspace" { screen = .workspace }
+        lastEnd = Breadcrumbs.launched()
         wire()
         Task { await boot() }
         if s.login.complete { connect() }
@@ -149,7 +154,10 @@ final class AppModel: ObservableObject {
         do {
             try await engine.open()
             try await previews.open()
-            _ = try? await engine.exec("app.memoryBudget", ["mb": 1536])
+            _ = try? await engine.exec("app.memoryBudget", ["mb": AppModel.cacheBudget()])
+            NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.memoryWarning() }
+            }
             let list = try await engine.array("develop.controls")
             editor.store.setControls(Controls.from(list))
             presets = try await presetsOf(engine)
@@ -448,6 +456,26 @@ final class AppModel: ObservableObject {
         withTransaction(t) { screen = .workspace }
     }
 
+    /// The engine's caches: a share of what this process may still use before iPadOS stops it
+    /// (`os_proc_available_memory`), so a heavy operation always has room.
+    static func cacheBudget() -> Int {
+        let free = Int(os_proc_available_memory() / 1_048_576)
+        guard free > 0 else { return 768 }
+        return max(384, min(1536, free / 4))
+    }
+
+    /// iPadOS asks for memory back: the caches empty (both engines), the viewer keeps the shot on
+    /// screen only; the budget comes back a little later.
+    private func memoryWarning() async {
+        NSLog("lightcraft: memory warning")
+        loupe.trim()
+        _ = try? await engine.exec("app.memoryBudget", ["mb": 96])
+        _ = try? await previews.exec("app.memoryBudget", ["mb": 64])
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        _ = try? await engine.exec("app.memoryBudget", ["mb": AppModel.cacheBudget()])
+        _ = try? await previews.exec("app.memoryBudget", ["mb": 256])
+    }
+
     /// A sharp window (`n`, 0…1 of the picture) of the shot on screen, as drawn whole at `full`
     /// pixels: the zoomed-in viewer. With the lens blur when it is on.
     func renderDetail(window n: CGRect, full: CGSize, done: @escaping (CGImage, CGRect) -> Void) {
@@ -461,6 +489,7 @@ final class AppModel: ObservableObject {
         // a screen's worth at most (the window is what is on screen)
         guard w * h <= 3200 * 3200 else { return }
         let rect = CGRect(x: CGFloat(x) / full.width, y: CGFloat(y) / full.height, width: CGFloat(w) / full.width, height: CGFloat(h) / full.height)
+        Breadcrumbs.mark("Zoom \(w)×\(h) di \(fw)×\(fh)")
         Task {
             guard let r = try? await engine.renderRegion(p, fullW: fw, fullH: fh, x: x, y: y, w: w, h: h), current == k else { return }
             let img = await editor.blurDetail(r.image, window: rect, full: full) ?? r.image
@@ -656,6 +685,7 @@ final class AppModel: ObservableObject {
             var failure = ""
             for (i, s) in list.enumerated() {
                 export?.done = i
+                Breadcrumbs.mark("Esportazione \(recipe.ext) di \(s.name)")
                 let url = tmp.appendingPathComponent("\(s.key).\(recipe.ext)")
                 do {
                     if recipe.format == .lightroom {

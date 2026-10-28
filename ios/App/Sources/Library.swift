@@ -238,16 +238,19 @@ final class Library: ObservableObject {
         if first && !restoring { onArrival?(key) }
     }
 
-    /// A picture of the shot as it looks now: its thumbnail is cut from it.
+    /// A picture of the shot as it looks now: its thumbnail is cut from it (off the main thread).
     func developed(_ key: String, photo: Int64, _ image: CGImage) {
         guard let s = shot(key), s.photo == photo || (photo == Library.preview && s.photo == 0) else { return }
         let first = s.thumb == nil
-        let t = scaled(image, edge: Library.thumbEdge)
-        edit(key) {
-            $0.thumb = t
-            $0.aspect = Double(t.width) / Double(t.height)
+        Task {
+            let t = await Task.detached(priority: .utility) { scaled(image, edge: Library.thumbEdge) }.value
+            guard let now = shot(key), now.photo == photo || (photo == Library.preview && now.photo == 0) else { return }
+            edit(key) {
+                $0.thumb = t
+                $0.aspect = Double(t.width) / Double(t.height)
+            }
+            if first && !restoring { onArrival?(key) }
         }
-        if first && !restoring { onArrival?(key) }
     }
 
     /// The photo was edited: its look changed.

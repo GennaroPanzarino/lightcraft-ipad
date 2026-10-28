@@ -1,26 +1,32 @@
 import SwiftUI
 
-/// The preferences: the camera, the transfer, the workspace, the renderer.
+/// The preferences: the camera, the transfer, the workspace, the renderer. A panel that slides in
+/// from the left edge over the screen (a tap beside it closes it).
 struct SettingsSheet: View {
     @EnvironmentObject var model: AppModel
-    @Environment(\.dismiss) private var dismiss
+    let close: () -> Void
     @State private var gpuAtStart = true
 
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Spacer()
                 Text("Impostazioni").font(Typo.title).foregroundColor(Lc.text)
                 Spacer()
+                Button { close() } label: {
+                    Image(systemName: "xmark").font(.system(size: 14, weight: .semibold)).foregroundColor(Lc.text2)
+                        .frame(width: 36, height: 36)
+                }
+                .buttonStyle(PressStyle())
             }
-            .overlay(Button("Fine") { dismiss() }.font(Typo.body.weight(.semibold)).foregroundColor(Lc.accent), alignment: .trailing)
-            .padding(.horizontal, 18)
-            .frame(height: 50)
+            .padding(.leading, 18)
+            .padding(.trailing, 8)
+            .frame(height: 48)
+            .padding(.top, windowControlsInset)
             .background(Lc.header)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     section("FOTOCAMERA") {
-                        CameraSettings(tether: model.tether) { dismiss() }
+                        CameraSettings(tether: model.tether) { close() }
                     }
                     section("TRASFERIMENTO") {
                         Segment(options: ["RAW", "JPEG rapido (2 MP)"], selected: model.settings.raw ? 0 : 1) { model.setRaw($0 == 0) }
@@ -56,7 +62,6 @@ struct SettingsSheet: View {
             }
         }
         .background(Lc.window.ignoresSafeArea())
-        .preferredColorScheme(.dark)
         .onAppear { gpuAtStart = model.settings.gpu }
     }
 
