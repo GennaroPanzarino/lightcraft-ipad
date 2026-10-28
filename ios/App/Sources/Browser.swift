@@ -193,7 +193,7 @@ private struct BrowserCell: View {
     var body: some View {
         VStack(spacing: 0) {
             Color.clear
-                .aspectRatio(1, contentMode: .fit)
+                .aspectRatio(4.0 / 3.0, contentMode: .fit)
                 .overlay(
                     ZStack {
                         if let t = shot.thumb {
@@ -208,7 +208,9 @@ private struct BrowserCell: View {
                             ProgressRing(fraction: shot.progress, line: 2).frame(width: 26, height: 26)
                         }
                     }
-                    .padding(10)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 10)
+                    .padding(.bottom, 4)
                 )
             HStack(spacing: 4) {
                 Text(shot.name).font(Typo.caption).foregroundColor(selected ? Lc.text : Lc.text2).lineLimit(1).truncationMode(.middle)

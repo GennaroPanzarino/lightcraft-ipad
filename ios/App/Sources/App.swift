@@ -62,9 +62,10 @@ struct RootView: View {
     private func testLandscape() {
         guard UserDefaults.standard.bool(forKey: "landscape") else { return }
         if #available(iOS 16.0, *) {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
                 let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-                scene?.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { _ in }
+                scene?.windows.first?.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+                scene?.requestGeometryUpdate(.iOS(interfaceOrientations: .landscapeRight)) { e in NSLog("lightcraft rotate: \(e)") }
             }
         }
     }

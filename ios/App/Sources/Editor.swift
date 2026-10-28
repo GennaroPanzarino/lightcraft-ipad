@@ -459,10 +459,10 @@ final class EditorModel: ObservableObject {
         let make = pick(["Make"]) ?? ""
         let model = pick(["Model", "Camera Model Name"]) ?? ""
         let camera = model.lowercased().hasPrefix(make.lowercased()) ? model : [make, model].filter { !$0.isEmpty }.joined(separator: " ")
-        let shutter = pick(["ExposureTime", "Exposure Time"])
-        let fnum = pick(["FNumber", "F Number"])
-        let iso = pick(["ISO", "ISOSpeedRatings", "PhotographicSensitivity", "ISO Speed Ratings"])
-        let focal = pick(["FocalLength", "Focal Length"])
+        let shutter = pick(["Exposure Time", "ExposureTime"])
+        let fnum = pick(["F-Number", "FNumber", "F Number"])
+        let iso = pick(["ISO Speed", "ISO", "ISOSpeedRatings", "PhotographicSensitivity", "ISO Speed Ratings"])
+        let focal = pick(["Focal Length", "FocalLength"])
         var lines: [MetaLine] = []
         func add(_ n: String, _ v: String?) { if let v = v, !v.isEmpty { lines.append(MetaLine(name: n, value: v)) } }
         add("Fotocamera", camera.isEmpty ? nil : camera)

@@ -79,14 +79,12 @@ struct ToolPanel: View {
             Rectangle().fill(Lc.line).frame(height: 1)
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: true) {
-                    LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
+                    LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(ToolGroup.allCases) { g in
-                            Section(header: GroupHeader(group: g)) {
-                                Color.clear.frame(height: 0).id(g)
-                                tools(g)
-                                    .disabled(ed.photo == 0 && g != .capture)
-                                    .opacity(ed.photo == 0 && g != .capture ? 0.45 : 1)
-                            }
+                            GroupHeader(group: g).id(g)
+                            tools(g)
+                                .disabled(ed.photo == 0 && g != .capture)
+                                .opacity(ed.photo == 0 && g != .capture ? 0.45 : 1)
                         }
                         Color.clear.frame(height: 240)
                     }
@@ -301,7 +299,7 @@ private struct GroupStrip: View {
     }
 }
 
-/// A group's title, pinned while its tools scroll under it.
+/// A group's title (Capture One's tool tab), above its tools.
 private struct GroupHeader: View {
     let group: ToolGroup
 

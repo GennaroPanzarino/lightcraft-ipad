@@ -116,9 +116,37 @@ final class AppModel: ObservableObject {
             await library.restore()
             ready = true
             if current == nil { current = library.shots.last?.key }
+            if UserDefaults.standard.bool(forKey: "benchmark") { Task { await benchmark() } }
         } catch {
             problem = error.localizedDescription
         }
+    }
+
+    /// Tests (`-benchmark YES`): how long a slider step (a draft) and a full picture take at the
+    /// viewer's size, in the log.
+    private func benchmark() async {
+        for _ in 0..<200 {
+            if let k = current, let p = library.shot(k)?.photo, p != 0 { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard let k = current, let p = library.shot(k)?.photo, p != 0 else { return }
+        try? await Task.sleep(nanoseconds: 3_000_000_000)
+        let (w, h) = editor.viewport
+        var drafts: [Double] = []
+        for i in 0..<14 {
+            let t = Date()
+            _ = try? await engine.batch { e -> Rendered in
+                _ = try e.execNow("library.select", ["ids": [p], "active": p])
+                _ = try e.execNow("develop.set", ["ids": [p], "values": ["light.exposure": Double(i % 4) * 0.1]])
+                return try e.renderNow(p, w, h, draft: true)
+            }
+            drafts.append(Date().timeIntervalSince(t) * 1000)
+        }
+        let t = Date()
+        _ = try? await engine.render(p, w, h, draft: false)
+        let full = Date().timeIntervalSince(t) * 1000
+        let steady = drafts.dropFirst(2).sorted()
+        NSLog("lightcraft bench: \(w)x\(h) draft median \(Int(steady[steady.count / 2])) ms (first \(Int(drafts[0])) ms), full \(Int(full)) ms, \(renderer)")
     }
 
     // ---- the camera

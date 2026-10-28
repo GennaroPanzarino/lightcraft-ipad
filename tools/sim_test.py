@@ -89,11 +89,14 @@ shot("05_portrait")
 launch("-screen", "browser")
 time.sleep(7)
 shot("06_portrait_browser")
+launch("-landscape", "YES", "-tool", "exposure", "-benchmark", "YES")
+time.sleep(24)
+shot("07_benchmark")
 
 log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "8m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
 open(os.path.join(OUT, "app.log"), "w").write(log)
 crashes = sh("bash", "-c", "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i lightcraft || true").stdout
 print("crash reports:", crashes or "none")
 for line in log.splitlines():
-    if "lightcraft" in line.lower() and ("renderer" in line or "editor" in line or "error" in line.lower()):
+    if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "rotate", "error", "Error")):
         print(line[:300])
