@@ -27,6 +27,9 @@ use serde_json::{Value, json};
 pub struct Core {
     session: Session,
     stages: Option<(u64, Arc<StageCache>)>,
+    /// The zoomed-in windows' own stage cache: with it the photo's full-size pixels stay on the
+    /// GPU between windows (without it every pan uploaded all of them again: 400 MB for 33 MP).
+    zoom: Option<(u64, Arc<StageCache>)>,
     /// Its own worker threads: the app runs two cores (the camera's previews, the raws), and on one
     /// shared pool a raw being developed would hold up the next preview until it is done.
     pool: Option<rayon::ThreadPool>,
@@ -55,7 +58,7 @@ impl Core {
             .start_handler(move |_| be_nice(nice))
             .build()
             .ok();
-        Ok(Core { session, stages: None, pool })
+        Ok(Core { session, stages: None, zoom: None, pool })
     }
 
     /// `f` on this core's worker threads.
@@ -166,7 +169,15 @@ impl Core {
             }
         }
         let window = lightcraft_pipeline::PixelWindow { x, y, w, h };
-        let job = self.session.region_job(photo, fw, fh, window, true).ok_or("region not available")?;
+        let stages = match &self.zoom {
+            Some((p, s)) if *p == id => s.clone(),
+            _ => {
+                let s: Arc<StageCache> = Default::default();
+                self.zoom = Some((id, s.clone()));
+                s
+            }
+        };
+        let job = self.session.region_job(photo, fw, fh, window, true).ok_or("region not available")?.with_stages(stages);
         let mut r = self.run_into(job, out, t0)?;
         r["window"] = json!([x, y, w, h]);
         r["full"] = json!([fw, fh]);
@@ -472,6 +483,28 @@ mod tests {
         }
         a.join().unwrap();
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// What zooming in costs (`LC_TEST_ARW=raw`): the screen render, then windows of the photo at
+    /// 100 % and far past it, the first one and the next ones.
+    #[test]
+    fn zoomed_windows() {
+        let Some(raw) = std::env::var_os("LC_TEST_ARW") else { return };
+        let dir = std::env::temp_dir().join(format!("lc-android-core-zoom-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut c = Core::open(&dir.to_string_lossy(), 0, false).unwrap();
+        let r = c.execute("library.import", &json!({"paths": [raw.to_string_lossy()]}).to_string());
+        let id = r["result"]["imported"][0].as_u64().expect("imported");
+        let mut buf = vec![0u8; 3200 * 3200 * 4];
+        let v = c.render(id, 2388, 1668, false, &mut buf).unwrap();
+        eprintln!("screen render {}", v["ms"]);
+        for (i, (fw, fh, x, y, w, h)) in
+            [(6000, 4000, 1200, 1200, 1800, 1200), (6000, 4000, 3600, 2000, 600, 400), (6000, 4000, 100, 100, 360, 240), (48000, 32000, 19200, 12800, 2400, 1600)].into_iter().enumerate()
+        {
+            let v = c.render_region(id, fw, fh, x, y, w, h, &mut buf).unwrap();
+            eprintln!("window {i}: {w}x{h} of {fw}x{fh} -> {}x{} in {} ms", v["width"], v["height"], v["ms"]);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Two raws in a row (`LC_TEST_ARWS=a;b`): what the first render costs, and the next.
