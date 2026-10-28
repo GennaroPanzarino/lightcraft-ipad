@@ -1,6 +1,11 @@
 import CoreGraphics
 import Foundation
 
+/// What a touch on the photo does: Capture One's cursor tools.
+enum CursorTool {
+    case none, crop, spot, paint, shape, sample
+}
+
 /// A line of the photo's metadata.
 struct MetaLine: Identifiable, Equatable {
     let name: String
@@ -38,6 +43,27 @@ final class EditorModel: ObservableObject {
     @Published var presetAmount = 100
     @Published private(set) var variants: [String: CGImage] = [:]
     @Published private(set) var hasCopy = false
+    /// What a touch on the photo does (Capture One's cursor tools).
+    @Published var cursorTool: CursorTool = .none
+    @Published private(set) var crop = CropState()
+    @Published private(set) var masks: [MaskInfo] = []
+    @Published var selectedMask: Int? {
+        didSet { if selectedMask != oldValue { loadLocal() } }
+    }
+    @Published private(set) var spots: [SpotInfo] = []
+    @Published var brushSize = 0.03
+    @Published var brushFeather = 50.0
+    @Published var brushFlow = 100.0
+    @Published var erasing = false
+    @Published var spotSize = 0.015
+    @Published var spotMode = "heal"
+    /// The photo without its crop: the crop tool draws the crop over it.
+    @Published private(set) var uncropped: CGImage?
+    /// The uncropped image's width / height.
+    private var imageAspect: CGFloat = 1.5
+    private var selectNewest = false
+    /// The selected layer's sliders.
+    let localStore = DevelopStore()
 
     let store = DevelopStore()
     private(set) var curves: [Channel: CurvePoints] = [:]
@@ -64,6 +90,10 @@ final class EditorModel: ObservableObject {
         case preset(String, Int)
         case command(String, [String: Any])
         case create(String, [String], (String?) -> Void)
+        case local([String: Double])
+        case cropDrag(String, CGPoint, CGPoint, CGRect)
+        case shape(Int, [String: Any])
+        case stroke([CGPoint], [Float])
     }
 
     private var queue: [Op] = []
@@ -80,6 +110,10 @@ final class EditorModel: ObservableObject {
         store.onBegin = { [weak self] label in self?.send(.begin(label)) }
         store.onChange = { [weak self] id, v in self?.send(.values([id: v])) }
         store.onEnd = { [weak self] in self?.send(.end) }
+        localStore.setControls(LocalControls.all)
+        localStore.onBegin = { [weak self] label in self?.send(.begin(label)) }
+        localStore.onChange = { [weak self] id, v in self?.send(.local([id: v])) }
+        localStore.onEnd = { [weak self] in self?.send(.end) }
     }
 
     var busy: Bool { interacting || running }
@@ -97,8 +131,14 @@ final class EditorModel: ObservableObject {
         preset = nil
         meta = []
         exposureLine = ""
+        cursorTool = .none
+        uncropped = nil
+        selectedMask = nil
+        masks = []
+        spots = []
         store.enabled = true
         Task {
+            await loadAspect()
             await refresh()
             await loadMeta()
         }
@@ -113,10 +153,134 @@ final class EditorModel: ObservableObject {
         }
         interacting = false
         picking = false
+        cursorTool = .none
+        uncropped = nil
         loupe.held = nil
         key = ""
         photo = 0
         store.enabled = false
+        localStore.enabled = false
+    }
+
+    // ---- crop, layers, spots (the cursor tools)
+
+    /// The crop tool: the photo uncropped, the crop drawn over it.
+    func enterCrop() {
+        guard photo != 0 else { return }
+        picking = false
+        cursorTool = .crop
+        let p = photo
+        let (w, h) = viewport
+        Task {
+            if let r = try? await engine.renderUncropped(p, w, h), p == photo, cursorTool == .crop { uncropped = r.image }
+        }
+    }
+
+    func exitCrop() {
+        cursorTool = .none
+        uncropped = nil
+    }
+
+    /// A crop handle dragged (`from`/`to` in the turned frame, `start` the crop when the drag began).
+    func cropDrag(_ handle: String, from: CGPoint, to: CGPoint, start: CGRect) {
+        send(.cropDrag(handle, from, to, start))
+    }
+
+    func addMask(_ kind: String) {
+        selectNewest = true
+        let n = masks.filter { $0.kind == kind }.count + 1
+        let name = (MaskInfo(id: 0, name: "", kind: kind, visible: true, invert: false, adjust: [:], shape: [:]).label) + (n > 1 ? " \(n)" : "")
+        run("mask.add", ["kind": kind, "name": name])
+        switch kind {
+        case "brush": cursorTool = .paint
+        case "linear", "radial": cursorTool = .shape
+        case "colorRange": cursorTool = .sample
+        default: break
+        }
+    }
+
+    func deleteMask(_ id: Int) {
+        if selectedMask == id { selectedMask = nil; if cursorTool != .crop { cursorTool = .none } }
+        run("mask.delete", ["id": id])
+    }
+
+    func setMaskVisible(_ id: Int, _ on: Bool) { run("mask.visible", ["id": id, "visible": on]) }
+    func invertMask(_ id: Int) { run("mask.invert", ["id": id]) }
+
+    /// A gradient's shape while a handle moves (one undo step per drag, between begin and end).
+    func updateShape(_ id: Int, _ shape: [String: Any]) { send(.shape(id, shape)) }
+
+    /// A brush stroke on the selected layer (image coordinates; pen pressure 0…1 per point).
+    func stroke(_ points: [CGPoint], pressure: [Float]) {
+        guard selectedMask != nil, points.count > 0 else { return }
+        send(.stroke(points, pressure))
+    }
+
+    /// The colour range of the selected layer samples the colour at `p` (image coordinates).
+    func sampleColor(_ p: CGPoint, add: Bool) {
+        guard let id = selectedMask else { return }
+        run("mask.sampleColor", ["id": id, "x": Double(p.x), "y": Double(p.y), "add": add])
+    }
+
+    func setLuminanceRange(_ id: Int, lo: Double, hi: Double) {
+        guard let m = masks.first(where: { $0.id == id }) else { return }
+        var s = m.shape
+        s["lo"] = lo
+        s["hi"] = hi
+        updateShape(id, s)
+    }
+
+    func addSpot(_ p: CGPoint) {
+        run("spot.add", ["mode": spotMode, "points": [[Double(p.x), Double(p.y)]], "size": spotSize])
+    }
+
+    func deleteSpot(_ index: Int) { run("spot.delete", ["index": index]) }
+
+    /// The selected layer's values into its sliders.
+    private func loadLocal() {
+        guard let id = selectedMask, let m = masks.first(where: { $0.id == id }) else {
+            localStore.enabled = false
+            localStore.load([:])
+            return
+        }
+        var v: [String: Double] = [:]
+        for k in LocalControls.ids { v["local.\(k)"] = m.adjust[k] ?? 0 }
+        localStore.enabled = true
+        localStore.load(v)
+    }
+
+    /// The uncropped image's proportions (for the crop and the image coordinates).
+    private func loadAspect() async {
+        let p = photo
+        if let r = try? await engine.renderUncropped(p, 128, 128, draft: true), p == photo, r.image.height > 0 {
+            imageAspect = CGFloat(r.image.width) / CGFloat(r.image.height)
+        }
+    }
+
+    /// Crop, layers and spots as LightCraft has them.
+    private func loadState() async {
+        let p = photo
+        guard p != 0, let d = try? await engine.object("develop.get", ["id": p]), p == photo else { return }
+        applyState(d)
+    }
+
+    private func applyState(_ d: [String: Any]) {
+        crop = CropState.from(d, aspect: imageAspect)
+        masks = MaskInfo.list(d)
+        spots = SpotInfo.list(d)
+        if selectNewest {
+            selectNewest = false
+            selectedMask = masks.last?.id
+        } else if let s = selectedMask, !masks.contains(where: { $0.id == s }) {
+            selectedMask = nil
+        }
+        let aspect = masks.first(where: { $0.id == selectedMask })?.adjust
+        if let a = aspect, !interacting {
+            var v: [String: Double] = [:]
+            for k in LocalControls.ids { v["local.\(k)"] = a[k] ?? 0 }
+            localStore.enabled = true
+            localStore.load(v)
+        }
     }
 
     // ---- what the panel calls
@@ -165,7 +329,8 @@ final class EditorModel: ObservableObject {
     /// The white balance from a neutral point of the photo (0…1 each way).
     func pickWhite(_ p: CGPoint) {
         picking = false
-        run("develop.wbPick", ["x": Double(p.x), "y": Double(p.y)])
+        let q = crop.toImage(p)
+        run("develop.wbPick", ["x": Double(q.x), "y": Double(q.y)])
     }
 
     func copySettings() {
@@ -234,6 +399,12 @@ final class EditorModel: ObservableObject {
         if case .values(let v) = op, case .values(let old)? = queue.last {
             queue[queue.count - 1] = .values(old.merging(v) { $1 })
         } else if case .curve = op, case .curve? = queue.last {
+            queue[queue.count - 1] = op
+        } else if case .local(let v) = op, case .local(let old)? = queue.last {
+            queue[queue.count - 1] = .local(old.merging(v) { $1 })
+        } else if case .cropDrag = op, case .cropDrag? = queue.last {
+            queue[queue.count - 1] = op
+        } else if case .shape = op, case .shape? = queue.last {
             queue[queue.count - 1] = op
         } else {
             queue.append(op)
@@ -337,6 +508,58 @@ final class EditorModel: ObservableObject {
                 if !keepsStyle { preset = nil }
                 await refresh()
                 await after(nil)
+            case .local(let v):
+                guard let mid = selectedMask else { break }
+                let (w, h) = viewport
+                let draft = interacting
+                let wasHeld = held
+                loupe.held = key
+                var values: [String: Double] = [:]
+                for (k, x) in v { values[String(k.dropFirst("local.".count))] = x }
+                let r = try await engine.batch { e -> Rendered in
+                    if !wasHeld { _ = try e.execNow("library.select", ["ids": [photo], "active": photo]) }
+                    _ = try e.execNow("mask.adjust", ["id": mid, "values": values])
+                    return try e.renderNow(photo, w, h, draft: draft)
+                }
+                if draft { show(r.image, draft: true) } else { await after(r.image) }
+            case .cropDrag(let handle, let from, let to, let start):
+                let r = try await engine.batch { e -> Any? in
+                    _ = try e.execNow("library.select", ["ids": [photo], "active": photo])
+                    _ = try e.execNow("crop.drag", ["handle": handle, "from": [Double(from.x), Double(from.y)], "to": [Double(to.x), Double(to.y)], "start": [Double(start.minX), Double(start.minY), Double(start.maxX), Double(start.maxY)]])
+                    return try e.execNow("develop.get", ["id": photo])
+                }
+                if let d = r as? [String: Any] { crop = CropState.from(d, aspect: imageAspect) }
+            case .shape(let mid, let shape):
+                let (w, h) = viewport
+                let draft = interacting
+                let wasHeld = held
+                loupe.held = key
+                let r = try await engine.batch { e -> Rendered in
+                    if !wasHeld { _ = try e.execNow("library.select", ["ids": [photo], "active": photo]) }
+                    _ = try e.execNow("mask.update", ["id": mid, "shape": shape])
+                    return try e.renderNow(photo, w, h, draft: draft)
+                }
+                if draft { show(r.image, draft: true) } else { await after(r.image) }
+            case .stroke(let pts, let pressure):
+                guard let mid = selectedMask else { break }
+                await lock.lock()
+                loupe.held = key
+                var params: [String: Any] = [
+                    "id": mid, "points": pts.map { [Double($0.x), Double($0.y)] }, "size": brushSize,
+                    "feather": brushFeather, "flow": brushFlow, "erase": erasing,
+                ]
+                if pressure.contains(where: { $0 < 0.999 }) { params["pressure"] = pressure.map { Double($0) } }
+                do {
+                    _ = try await engine.batch { e in
+                        _ = try e.execNow("library.select", ["ids": [photo], "active": photo])
+                        _ = try e.execNow("mask.brushStroke", params)
+                    }
+                } catch {
+                    await lock.unlock()
+                    throw error
+                }
+                await lock.unlock()
+                await after(nil)
             case .create(let name, let groups, let done):
                 var id: String?
                 if let r = try? await engine.batch({ e -> Any? in
@@ -382,6 +605,7 @@ final class EditorModel: ObservableObject {
             loupe.held = nil
             loupe.pump()
         }
+        await loadState()
         await loadHistory()
     }
 
@@ -418,6 +642,7 @@ final class EditorModel: ObservableObject {
             cropAspect = ""
         }
         disabled = Set((d["disabled_sections"] as? [Any] ?? []).compactMap { $0 as? String })
+        applyState(d)
         if !keepVariants {
             variantsTask?.cancel()
             variants = [:]

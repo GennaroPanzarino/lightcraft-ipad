@@ -15,6 +15,8 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
 
     private let scroll = UIScrollView()
     private let imageView = UIImageView()
+    /// Spots, strokes and gradients on the photo (it zooms with it).
+    let overlay = EditOverlay()
     private let side = UIImageView()
     private var key = ""
     private var current: CGImage?
@@ -42,6 +44,9 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         imageView.isUserInteractionEnabled = true
         imageView.layer.minificationFilter = .trilinear
         scroll.addSubview(imageView)
+        overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        overlay.isUserInteractionEnabled = false
+        imageView.addSubview(overlay)
         side.contentMode = .scaleAspectFit
         side.isHidden = true
         addSubview(side)
@@ -127,6 +132,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
             let zoom = scroll.zoomScale
             scroll.zoomScale = 1
             imageView.frame = CGRect(origin: .zero, size: f)
+            overlay.frame = imageView.bounds
             scroll.contentSize = f
             scroll.zoomScale = zoom
         }
@@ -140,7 +146,18 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     }
 
     func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
-    func scrollViewDidZoom(_ scrollView: UIScrollView) { center() }
+    func scrollViewDidZoom(_ scrollView: UIScrollView) {
+        center()
+        overlay.zoom = scrollView.zoomScale
+    }
+
+    /// A cursor tool on the photo: one finger is the tool's, two fingers still move and zoom.
+    func setTool(_ tool: CursorTool) {
+        overlay.mode = tool
+        let drawing = [.spot, .paint, .shape, .sample].contains(tool)
+        scroll.panGestureRecognizer.minimumNumberOfTouches = drawing ? 2 : 1
+        paging.isEnabled = !drawing
+    }
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) { onZoom?(scale) }
 
     @objc private func doubleTap(_ g: UITapGestureRecognizer) {
@@ -242,12 +259,19 @@ struct ViewerHost: UIViewRepresentable {
         let v = PhotoViewer()
         let model = self.model
         model.loupe.onViewer = { [weak v] p in v?.show(p.image) }
+        let ed = model.editor
+        v.overlay.onSpot = { p in ed.addSpot(p) }
+        v.overlay.onSample = { p in ed.sampleColor(p, add: false) }
+        v.overlay.onStroke = { pts, pr in ed.stroke(pts, pressure: pr) }
+        v.overlay.onShapeBegin = { ed.begin("Maschera") }
+        v.overlay.onShape = { s in if let id = ed.selectedMask { ed.updateShape(id, s) } }
+        v.overlay.onShapeEnd = { ed.end() }
         v.onPage = { by in model.step(by) }
         v.neighbor = { by in model.neighborPicture(by) }
         v.onTap = { p in
             if model.editor.picking, let p = p {
                 model.editor.pickWhite(p)
-            } else {
+            } else if model.editor.cursorTool == .none {
                 withAnimation(Motion.panel) { model.chrome.toggle() }
             }
         }
@@ -265,5 +289,12 @@ struct ViewerHost: UIViewRepresentable {
             v.show(t)
         }
         v.hold(before)
+        let ed = model.editor
+        v.setTool(ed.cursorTool)
+        v.overlay.crop = ed.crop
+        v.overlay.spots = ed.spots
+        v.overlay.mask = ed.masks.first { $0.id == ed.selectedMask }
+        v.overlay.brushSize = CGFloat(ed.brushSize)
+        v.overlay.erasing = ed.erasing
     }
 }

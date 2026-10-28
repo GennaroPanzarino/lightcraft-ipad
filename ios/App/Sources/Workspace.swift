@@ -68,7 +68,29 @@ private struct WorkspaceBar: View {
                     withAnimation(Motion.panel) { model.toolsShown.toggle() }
                 }
                 Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
-                ToolIcon(icon: "eyedropper", active: ed.picking, enabled: ed.photo != 0) { ed.picking.toggle() }
+                ToolIcon(icon: "eyedropper", active: ed.picking, enabled: ed.photo != 0) {
+                    ed.cursorTool = ed.cursorTool == .crop ? .none : ed.cursorTool
+                    ed.picking.toggle()
+                }
+                ToolIcon(icon: "crop", active: ed.cursorTool == .crop, enabled: ed.photo != 0) {
+                    if ed.cursorTool == .crop { ed.exitCrop() } else { ed.enterCrop() }
+                }
+                ToolIcon(icon: "bandage", active: ed.cursorTool == .spot, enabled: ed.photo != 0) {
+                    ed.picking = false
+                    if ed.cursorTool == .crop { ed.exitCrop() }
+                    ed.cursorTool = ed.cursorTool == .spot ? .none : .spot
+                }
+                ToolIcon(icon: "paintbrush.pointed", active: ed.cursorTool == .paint, enabled: ed.photo != 0) {
+                    ed.picking = false
+                    if ed.cursorTool == .crop { ed.exitCrop() }
+                    if ed.cursorTool == .paint {
+                        ed.cursorTool = .none
+                    } else if let m = ed.masks.first(where: { $0.id == ed.selectedMask }), m.kind == "brush" {
+                        ed.cursorTool = .paint
+                    } else {
+                        ed.addMask("brush")
+                    }
+                }
                 BeforeButton(ed: ed, before: $before)
                 Spacer(minLength: 8)
                 ToolIcon(icon: "arrow.uturn.backward", enabled: ed.canUndo) { ed.undo() }
@@ -166,7 +188,11 @@ private struct ViewerArea: View {
                 if shots.isEmpty {
                     EmptyViewer(tether: model.tether)
                 } else {
-                    ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before)
+                    if ed.cursorTool == .crop {
+                        CropHost(ed: ed)
+                    } else {
+                        ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before)
+                    }
                     if let s = shot, s.stage == .arriving && s.thumb == nil && model.loupe.pics[s.key] == nil {
                         VStack(spacing: 10) {
                             ProgressRing(fraction: s.progress, line: 2.5).frame(width: 44, height: 44)
@@ -184,6 +210,17 @@ private struct ViewerArea: View {
                             .padding(.top, model.chrome ? 12 : 12 + windowControlsInset)
                     }
                     Spacer()
+                    if ed.cursorTool == .crop {
+                        CropBar(ed: ed)
+                            .padding(.bottom, 14)
+                    } else if ed.cursorTool == .spot || ed.cursorTool == .paint || ed.cursorTool == .shape || ed.cursorTool == .sample {
+                        Text(toolHint(ed.cursorTool))
+                            .font(Typo.labelStrong).foregroundColor(Lc.text)
+                            .padding(.horizontal, 12).frame(height: 30)
+                            .background(Lc.raised.opacity(0.95))
+                            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                            .padding(.bottom, 12)
+                    }
                     if before != nil {
                         Text("PRIMA").font(Typo.group).tracking(1).foregroundColor(Lc.text)
                             .padding(.horizontal, 10).frame(height: 24)
@@ -221,6 +258,54 @@ private struct ViewerArea: View {
             let big = s.key == model.current && zoomed
             return Loupe.Want(key: s.key, photo: s.photo, revision: s.revision, w: big ? 8192 : w, h: big ? 8192 : h)
         })
+    }
+}
+
+private func toolHint(_ t: CursorTool) -> String {
+    switch t {
+    case .spot: return "Tocca una macchia per rimuoverla · due dita per zoomare"
+    case .paint: return "Dipingi la maschera · due dita per zoomare"
+    case .shape: return "Trascina le maniglie del gradiente"
+    case .sample: return "Tocca il colore da selezionare"
+    default: return ""
+    }
+}
+
+/// The crop tool's commands under the photo.
+private struct CropBar: View {
+    @ObservedObject var ed: EditorModel
+    private let ratios: [(String, String)] = [
+        ("original", "Originale"), ("free", "Libero"), ("1x1", "1:1"), ("4x5", "4:5"), ("5x7", "5:7"),
+        ("2x3", "2:3"), ("4x3", "4:3"), ("16x9", "16:9"), ("16x10", "16:10"),
+    ]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Menu {
+                ForEach(ratios, id: \.0) { r in Button(r.1) { ed.run("crop.aspect", ["aspect": r.0]) } }
+            } label: {
+                Label(ratios.first { $0.0 == ed.cropAspect }?.1 ?? "Libero", systemImage: "aspectratio")
+                    .font(Typo.labelStrong).foregroundColor(Lc.text)
+                    .padding(.horizontal, 10).frame(height: 34)
+            }
+            ToolIcon(icon: "rotate.right") { ed.run("crop.rotateAspect") }
+            ToolIcon(icon: "level") { ed.run("crop.autoStraighten") }
+            ToolIcon(icon: "arrow.counterclockwise") { ed.run("crop.reset") }
+            Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 4)
+            Button { ed.exitCrop() } label: {
+                Text("Fine").font(Typo.labelStrong).foregroundColor(.black)
+                    .padding(.horizontal, 16).frame(height: 32)
+                    .background(Lc.select)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            }
+            .buttonStyle(PressStyle())
+        }
+        .padding(.horizontal, 8)
+        .frame(height: 46)
+        .background(Lc.header.opacity(0.96))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 6, style: .continuous).stroke(Lc.hairline2, lineWidth: 0.5))
+        .shadow(color: .black.opacity(0.5), radius: 12, y: 4)
     }
 }
 

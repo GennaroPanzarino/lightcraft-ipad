@@ -159,6 +159,17 @@ pub unsafe extern "C" fn lc_render_before(h: *mut c_void, photo: u64, w: u32, hh
     with_core(h, move |c| c.render_before(photo, w.max(1) as usize, hh.max(1) as usize, b))
 }
 
+/// The photo without its crop and straightening (the crop tool's picture).
+///
+/// # Safety
+/// As `lc_render`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn lc_render_uncropped(h: *mut c_void, photo: u64, w: u32, hh: u32, draft: bool, buf: *mut u8, cap: usize) -> *mut c_char {
+    // SAFETY: as documented.
+    let b = unsafe { buffer(buf, cap) };
+    with_core(h, move |c| c.render_uncropped(photo, w.max(1) as usize, hh.max(1) as usize, draft, b))
+}
+
 /// # Safety
 /// As `lc_render`.
 #[unsafe(no_mangle)]

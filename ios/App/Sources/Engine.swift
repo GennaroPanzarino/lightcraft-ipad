@@ -156,6 +156,14 @@ final class Engine: @unchecked Sendable {
         }
     }
 
+    /// The photo without its crop and straightening (the crop tool draws the crop over it).
+    func renderUncropped(_ photo: Int64, _ w: Int, _ h: Int, draft: Bool = false) async throws -> Rendered {
+        try await run {
+            self.room(w, h)
+            return try self.picture(self.take(lc_render_uncropped(self.handle, UInt64(photo), self.clamp(w), self.clamp(h), draft, self.buffer, self.capacity)))
+        }
+    }
+
     func thumb(_ photo: Int64, edge: Int) async throws -> Rendered {
         try await run { try self.picture(self.take(lc_thumb(self.handle, UInt64(photo), UInt32(edge), self.buffer, self.capacity))) }
     }

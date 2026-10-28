@@ -162,8 +162,34 @@ final class AppModel: ObservableObject {
             if current == nil { current = library.shots.last?.key }
             if UserDefaults.standard.bool(forKey: "benchmark") { Task { await benchmark() } }
             if UserDefaults.standard.bool(forKey: "exportTest") { Task { await exportTest() } }
+            if let t = UserDefaults.standard.string(forKey: "testTool") { Task { await testTool(t) } }
         } catch {
             problem = error.localizedDescription
+        }
+    }
+
+    /// Tests (`-testTool crop|radial|brush|spots`): a cursor tool on, for the screenshots.
+    private func testTool(_ t: String) async {
+        for _ in 0..<200 {
+            if editor.photo != 0 { break }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        try? await Task.sleep(nanoseconds: 2_000_000_000)
+        switch t {
+        case "crop":
+            editor.run("crop.aspect", ["aspect": "4x5"])
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            editor.enterCrop()
+        case "radial", "linear", "brush":
+            editor.addMask(t)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            editor.localStore.userSet("local.exposure", 1.2, from: nil)
+        case "spots":
+            editor.cursorTool = .spot
+            editor.addSpot(CGPoint(x: 0.3, y: 0.4))
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            editor.addSpot(CGPoint(x: 0.6, y: 0.55))
+        default: break
         }
     }
 

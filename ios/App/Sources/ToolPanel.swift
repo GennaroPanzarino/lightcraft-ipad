@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 
 /// Capture One's tool tabs, here as the groups of one long scrolling column.
 enum ToolGroup: String, CaseIterable, Identifiable {
-    case capture, lens, composition, exposure, color, details, adjustments, metadata
+    case capture, lens, composition, exposure, color, local, details, adjustments, metadata
     var id: String { rawValue }
     var title: String {
         switch self {
@@ -13,6 +13,7 @@ enum ToolGroup: String, CaseIterable, Identifiable {
         case .composition: return "Composizione"
         case .exposure: return "Esposizione"
         case .color: return "Colore"
+        case .local: return "Regolazioni locali"
         case .details: return "Dettagli"
         case .adjustments: return "Regolazioni"
         case .metadata: return "Metadati"
@@ -25,6 +26,7 @@ enum ToolGroup: String, CaseIterable, Identifiable {
         case .composition: return "crop"
         case .exposure: return "sun.max"
         case .color: return "paintpalette"
+        case .local: return "square.3.layers.3d"
         case .details: return "scope"
         case .adjustments: return "slider.horizontal.3"
         case .metadata: return "info.circle"
@@ -198,7 +200,10 @@ struct ToolPanel: View {
             ToolBox(id: "calibration", title: "Calibrazione", state: state, ed: ed, resetIds: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"]) {
                 Sliders(store: s, ids: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"])
             }
+        case .local:
+            ToolBox(id: "layers", title: "Livelli", state: state) { LayersTool(ed: ed) }
         case .details:
+            ToolBox(id: "spots", title: "Rimozione macchie", state: state) { SpotTool(ed: ed) }
             ToolBox(id: "sharpen", title: "Nitidezza", state: state, ed: ed, resetIds: ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"]) {
                 Sliders(store: s, ids: ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"])
             }
@@ -541,6 +546,10 @@ private struct CropTool: View {
                     Button(r.1) { ed.run("crop.aspect", ["aspect": r.0]) }
                 }
             }
+            FlatButton(title: ed.cursorTool == .crop ? "Fine" : "Ritaglia sulla foto", icon: "crop", prominent: ed.cursorTool == .crop) {
+                if ed.cursorTool == .crop { ed.exitCrop() } else { ed.enterCrop() }
+            }
+            .padding(.vertical, 4)
             Sliders(store: ed.store, ids: ["crop.angle"])
             HStack(spacing: 6) {
                 FlatButton(title: "Livella", icon: "level") { ed.run("crop.autoStraighten") }
@@ -701,6 +710,183 @@ private struct ColorEditorTool: View {
             }
             Text(band.label).font(Typo.labelStrong).foregroundColor(Lc.text)
             Sliders(store: store, ids: ["mixer.\(band.rawValue).hue", "mixer.\(band.rawValue).sat", "mixer.\(band.rawValue).lum"])
+        }
+    }
+}
+
+// MARK: - Local adjustments
+
+/// Capture One's layers: masks (brush, gradients, ranges), each with its own sliders.
+private struct LayersTool: View {
+    @ObservedObject var ed: EditorModel
+    @State private var feather = 50.0
+    @State private var lo = 60.0
+    @State private var hi = 100.0
+
+    var body: some View {
+        let selected = ed.masks.first { $0.id == ed.selectedMask }
+        VStack(alignment: .leading, spacing: 6) {
+            Menu {
+                Button { ed.addMask("brush") } label: { Label("Pennello", systemImage: "paintbrush.pointed") }
+                Button { ed.addMask("linear") } label: { Label("Gradiente lineare", systemImage: "square.split.diagonal") }
+                Button { ed.addMask("radial") } label: { Label("Gradiente radiale", systemImage: "circle.dashed") }
+                Button { ed.addMask("luminanceRange") } label: { Label("Gamma luminanza", systemImage: "sun.max") }
+                Button { ed.addMask("colorRange") } label: { Label("Gamma colore", systemImage: "eyedropper") }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "plus").font(.system(size: 13, weight: .semibold))
+                    Text("Nuovo livello").font(Typo.labelStrong)
+                }
+                .foregroundColor(Lc.text)
+                .frame(maxWidth: .infinity, minHeight: 34)
+                .background(Lc.raised)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            }
+            .padding(.top, 2)
+            if ed.masks.isEmpty {
+                Text("Nessun livello. Un livello regola solo una parte della foto: dipinta, sfumata o scelta per luce o colore.")
+                    .font(Typo.caption).foregroundColor(Lc.text3).fixedSize(horizontal: false, vertical: true)
+            }
+            VStack(spacing: 1) {
+                ForEach(ed.masks.reversed()) { m in
+                    LayerRow(mask: m, selected: m.id == ed.selectedMask,
+                             onSelect: {
+                                 ed.selectedMask = m.id
+                                 switch m.kind {
+                                 case "brush": ed.cursorTool = .paint
+                                 case "linear", "radial": ed.cursorTool = .shape
+                                 default: if ed.cursorTool != .crop { ed.cursorTool = .none }
+                                 }
+                             },
+                             onVisible: { ed.setMaskVisible(m.id, !m.visible) },
+                             onDelete: { ed.deleteMask(m.id) })
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            if let m = selected {
+                shapeControls(m)
+                ToggleRow(label: "Inverti", on: m.invert) { _ in ed.invertMask(m.id) }
+                Text("REGOLAZIONI DEL LIVELLO").overline().padding(.top, 6)
+                Sliders(store: ed.localStore, ids: LocalControls.ids.map { "local.\($0)" })
+            }
+        }
+        .onChange(of: ed.selectedMask) { _ in loadShape() }
+        .onAppear { loadShape() }
+    }
+
+    private func loadShape() {
+        guard let m = ed.masks.first(where: { $0.id == ed.selectedMask }) else { return }
+        feather = m.shape["feather"].map { double($0) } ?? 50
+        lo = (m.shape["lo"].map { double($0) } ?? 0.6) * 100
+        hi = (m.shape["hi"].map { double($0) } ?? 1) * 100
+    }
+
+    @ViewBuilder
+    private func shapeControls(_ m: MaskInfo) -> some View {
+        switch m.kind {
+        case "brush":
+            Segment(options: ["Dipingi", "Cancella"], selected: ed.erasing ? 1 : 0) { ed.erasing = $0 == 1 }
+                .padding(.top, 4)
+            ValueSlider(control: Control(id: "brush.size", label: "Dimensione", min: 0.5, max: 25, def: 3, step: 0.1, decimals: 1, track: .plain),
+                        value: ed.brushSize * 100, onChange: { ed.brushSize = $0 / 100 })
+                .frame(height: ToolSlider.height)
+            ValueSlider(control: Control(id: "brush.feather", label: "Sfumatura", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
+                        value: ed.brushFeather, onChange: { ed.brushFeather = $0 })
+                .frame(height: ToolSlider.height)
+            ValueSlider(control: Control(id: "brush.flow", label: "Flusso", min: 1, max: 100, def: 100, step: 1, decimals: 0, track: .plain),
+                        value: ed.brushFlow, onChange: { ed.brushFlow = $0 })
+                .frame(height: ToolSlider.height)
+            FlatButton(title: ed.cursorTool == .paint ? "Pennello attivo" : "Dipingi sulla foto", icon: "paintbrush.pointed", prominent: ed.cursorTool == .paint) {
+                ed.cursorTool = ed.cursorTool == .paint ? .none : .paint
+            }
+        case "linear", "radial":
+            if m.kind == "radial" {
+                ValueSlider(control: Control(id: "radial.feather", label: "Sfumatura", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
+                            value: feather, onChange: { feather = $0 },
+                            onEnd: {
+                                var s = m.shape
+                                s["feather"] = feather
+                                ed.updateShape(m.id, s)
+                            })
+                    .frame(height: ToolSlider.height)
+            }
+            FlatButton(title: ed.cursorTool == .shape ? "Maniglie attive" : "Modifica sulla foto", icon: "hand.draw", prominent: ed.cursorTool == .shape) {
+                ed.cursorTool = ed.cursorTool == .shape ? .none : .shape
+            }
+            .padding(.top, 4)
+        case "luminanceRange":
+            ValueSlider(control: Control(id: "lum.lo", label: "Da", min: 0, max: 100, def: 60, step: 1, decimals: 0, track: .gradient([UIColor(hex: 0x111111), UIColor(hex: 0xEEEEEE)])),
+                        value: lo, onChange: { lo = $0 }, onEnd: { ed.setLuminanceRange(m.id, lo: lo / 100, hi: hi / 100) })
+                .frame(height: ToolSlider.height)
+            ValueSlider(control: Control(id: "lum.hi", label: "A", min: 0, max: 100, def: 100, step: 1, decimals: 0, track: .gradient([UIColor(hex: 0x111111), UIColor(hex: 0xEEEEEE)])),
+                        value: hi, onChange: { hi = $0 }, onEnd: { ed.setLuminanceRange(m.id, lo: lo / 100, hi: hi / 100) })
+                .frame(height: ToolSlider.height)
+        case "colorRange":
+            FlatButton(title: ed.cursorTool == .sample ? "Tocca la foto" : "Campiona un colore", icon: "eyedropper", prominent: ed.cursorTool == .sample) {
+                ed.cursorTool = ed.cursorTool == .sample ? .none : .sample
+            }
+            .padding(.top, 4)
+        default:
+            EmptyView()
+        }
+    }
+}
+
+private struct LayerRow: View {
+    let mask: MaskInfo
+    let selected: Bool
+    let onSelect: () -> Void
+    let onVisible: () -> Void
+    let onDelete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: onVisible) {
+                Image(systemName: mask.visible ? "eye" : "eye.slash")
+                    .font(.system(size: 13))
+                    .foregroundColor(mask.visible ? Lc.text2 : Lc.text3)
+                    .frame(width: 30, height: 34)
+            }
+            .buttonStyle(.plain)
+            Image(systemName: mask.icon).font(.system(size: 13)).foregroundColor(selected ? Lc.accent : Lc.text2)
+            Text(mask.name.isEmpty ? mask.label : mask.name).font(Typo.label).foregroundColor(selected ? Lc.text : Lc.text2).lineLimit(1)
+            Spacer(minLength: 4)
+            Button(action: onDelete) {
+                Image(systemName: "trash").font(.system(size: 12)).foregroundColor(Lc.text3).frame(width: 30, height: 34)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.leading, 2)
+        .background(selected ? Lc.pressed : Lc.field)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onSelect)
+    }
+}
+
+/// Capture One's spot removal: heal, clone or fill a spot with a touch.
+private struct SpotTool: View {
+    @ObservedObject var ed: EditorModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Segment(options: ["Guarisci", "Clona", "Riempi"], selected: ["heal", "clone", "fill"].firstIndex(of: ed.spotMode) ?? 0) {
+                ed.spotMode = ["heal", "clone", "fill"][$0]
+            }
+            .padding(.top, 2)
+            ValueSlider(control: Control(id: "spot.size", label: "Dimensione", min: 0.3, max: 10, def: 1.5, step: 0.1, decimals: 1, track: .plain),
+                        value: ed.spotSize * 100, onChange: { ed.spotSize = $0 / 100 })
+                .frame(height: ToolSlider.height)
+            FlatButton(title: ed.cursorTool == .spot ? "Tocca le macchie sulla foto" : "Rimuovi macchie sulla foto", icon: "bandage", prominent: ed.cursorTool == .spot) {
+                ed.picking = false
+                ed.cursorTool = ed.cursorTool == .spot ? .none : .spot
+            }
+            HStack(spacing: 6) {
+                FlatButton(title: "Trova polvere", icon: "sparkle.magnifyingglass") { ed.run("spot.findDust") }
+                FlatButton(title: "Togli l'ultima", icon: "arrow.uturn.backward", enabled: !ed.spots.isEmpty) { ed.deleteSpot(ed.spots.count - 1) }
+            }
+            Text(ed.spots.isEmpty ? "Nessuna macchia" : (ed.spots.count == 1 ? "1 macchia corretta" : "\(ed.spots.count) macchie corrette"))
+                .font(Typo.caption).foregroundColor(Lc.text3)
+                .padding(.bottom, 2)
         }
     }
 }
