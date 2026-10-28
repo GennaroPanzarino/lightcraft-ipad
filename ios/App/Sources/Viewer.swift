@@ -293,7 +293,7 @@ struct ViewerHost: UIViewRepresentable {
         v.setTool(ed.cursorTool)
         v.overlay.crop = ed.crop
         v.overlay.spots = ed.spots
-        v.overlay.mask = ed.masks.first { $0.id == ed.selectedMask }
+        v.overlay.maskInfo = ed.masks.first { $0.id == ed.selectedMask }
         v.overlay.brushSize = CGFloat(ed.brushSize)
         v.overlay.erasing = ed.erasing
     }

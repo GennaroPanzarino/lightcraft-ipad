@@ -14,7 +14,7 @@ final class EditOverlay: UIView {
     }
     var crop = CropState() { didSet { if crop != oldValue { redraw() } } }
     var spots: [SpotInfo] = [] { didSet { if spots != oldValue { redraw() } } }
-    var mask: MaskInfo? { didSet { if mask != oldValue && dragging == nil { redraw() } } }
+    var maskInfo: MaskInfo? { didSet { if maskInfo != oldValue && dragging == nil { redraw() } } }
     var brushSize: CGFloat = 0.03
     var spotSize: CGFloat = 0.015
     var erasing = false { didSet { stroke.strokeColor = (erasing ? UIColor.white : Ux.accent).withAlphaComponent(0.45).cgColor } }
@@ -115,7 +115,7 @@ final class EditOverlay: UIView {
         // gradients
         let g = UIBezierPath()
         let h = UIBezierPath()
-        let shape = working ?? mask?.shape ?? [:]
+        let shape = working ?? maskInfo?.shape ?? [:]
         if mode == .shape {
             let k: CGFloat = 7 / zoom
             func knob(_ p: CGPoint) { h.append(UIBezierPath(ovalIn: CGRect(x: p.x - k, y: p.y - k, width: 2 * k, height: 2 * k))) }
@@ -247,7 +247,7 @@ final class EditOverlay: UIView {
     // MARK: gradient handles
 
     private func grabHandle(at p: CGPoint) {
-        guard let shape = mask?.shape else { return }
+        guard let shape = maskInfo?.shape else { return }
         var best: (String, CGFloat)?
         func consider(_ name: String, _ q: CGPoint) {
             let d = hypot(q.x - p.x, q.y - p.y)
