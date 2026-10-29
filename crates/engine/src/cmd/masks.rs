@@ -241,6 +241,8 @@ pub fn specs() -> Vec<CommandSpec> {
                 let mut shape = shape_from(&kind, p, "mask.add")?;
                 let later = resolve_ai(s, &mut shape, "mask.add")?;
                 let name = str_param(p, "name").map(str::to_string);
+                // the component's own name (a selection made by the app: what it selected)
+                let part_name = str_param(p, "componentName").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
                 if let Later::Text(text) = &later {
                     let id = s.active().ok_or_else(|| bad("mask.add", "no active photo"))?;
                     segment(s, |s| s.segment_text_later(id, None, "add", name, text))?;
@@ -253,7 +255,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     masks.push(Mask {
                         id: next,
                         name: name.unwrap_or_else(|| format!("Mask {next}")),
-                        components: vec![MaskComponent { name: None, op: MaskOp::Add, invert: false, shape }],
+                        components: vec![MaskComponent { name: part_name, op: MaskOp::Add, invert: false, shape }],
                         adjust,
                         ..Default::default()
                     });
@@ -268,7 +270,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Add/Subtract/Intersect Mask",
             [],
             None,
-            "{id?: maskId, op: add|subtract|intersect, kind, ...shape params}",
+            "{id?: maskId, op: add|subtract|intersect, kind, name?, invert?, ...shape params}",
             has_active,
             |s, p| {
                 let kind = str_param(p, "kind").unwrap_or("brush").to_string();
@@ -290,7 +292,8 @@ pub fn specs() -> Vec<CommandSpec> {
                 let mut comp = 0;
                 let out = masks_edit(s, "mask.addComponent", "Edit Mask", |masks, _| {
                     let i = find(masks, mid, "mask.addComponent")?;
-                    masks[i].components.push(MaskComponent { name: None, op, invert: bool_or(p, "invert", false), shape });
+                    let name = str_param(p, "name").map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+                    masks[i].components.push(MaskComponent { name, op, invert: bool_or(p, "invert", false), shape });
                     comp = masks[i].components.len() - 1;
                     Ok(())
                 })?;
@@ -302,7 +305,7 @@ pub fn specs() -> Vec<CommandSpec> {
             "Brush Stroke",
             [],
             None,
-            "{id?: maskId, points: [[x,y],…] normalized, size?: fraction of long edge (0.03), feather?, flow?, density?, erase?: bool, autoMask?: bool, pressure?: [p,…] pen pressure 0..1 per point (scales each dab's size and flow; omitted: full), connect?: bool — start from the last point of the mask's last stroke (⇧-click), size / feather / flow tapering from that stroke's to these} → {activeMask, connected}",
+            "{id?: maskId, component?: index of a brush component (default: the last one), points: [[x,y],…] normalized, size?: fraction of long edge (0.03), feather?, flow?, density?, erase?: bool, autoMask?: bool, pressure?: [p,…] pen pressure 0..1 per point (scales each dab's size and flow; omitted: full), connect?: bool — start from the last point of the mask's last stroke (⇧-click), size / feather / flow tapering from that stroke's to these} → {activeMask, connected}",
             has_active,
             |s, p| {
                 let pts: Vec<Point> = p
@@ -325,6 +328,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     pressure: pressure_list(p.get("pressure"), pts_len)?,
                 };
                 let connect = bool_or(p, "connect", false);
+                let component = optional_index(p, "component", "mask.brushStroke")?;
                 let mut connected = false;
                 let next = s.active().and_then(|id| s.develop_of(id)).map(|d| d.next_mask_id()).unwrap_or(1);
                 let want = optional_mask_id(p, "mask.brushStroke")?.or(s.active_mask);
@@ -339,9 +343,12 @@ pub fn specs() -> Vec<CommandSpec> {
                         }
                     };
                     let m = &mut masks[i];
-                    if let Some(MaskComponent { shape: MaskShape::Brush { strokes }, .. }) =
-                        m.components.iter_mut().rev().find(|c| matches!(c.shape, MaskShape::Brush { .. }))
-                    {
+                    // the brush component asked for (`component`), else the mask's last one
+                    let target = match component {
+                        Some(k) if matches!(m.components.get(k).map(|c| &c.shape), Some(MaskShape::Brush { .. })) => m.components.get_mut(k),
+                        _ => m.components.iter_mut().rev().find(|c| matches!(c.shape, MaskShape::Brush { .. })),
+                    };
+                    if let Some(MaskComponent { shape: MaskShape::Brush { strokes }, .. }) = target {
                         // the previous stroke's end and its brush values (not its points)
                         let anchor = strokes.last().filter(|_| connect).and_then(|l| {
                             Some((

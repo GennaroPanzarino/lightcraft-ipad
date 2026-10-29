@@ -4,6 +4,8 @@ import Foundation
 /// What a touch on the photo does: Capture One's cursor tools.
 enum CursorTool {
     case none, crop, spot, paint, shape, sample, focus
+    /// Lens Blur's Refine brush (painted on the photo, kept by the app).
+    case refine
 }
 
 /// A line of the photo's metadata.
@@ -48,6 +50,7 @@ final class EditorModel: ObservableObject {
         didSet {
             guard cursorTool != oldValue else { return }
             localAdjusting = false
+            if cursorTool != .spot && visualizeSpots { visualizeSpots = false }
             if EditorModel.maskTools.contains(cursorTool) { refreshMask() }
         }
     }
@@ -71,11 +74,15 @@ final class EditorModel: ObservableObject {
     @Published var selectedMask: Int? {
         didSet {
             guard selectedMask != oldValue else { return }
+            selectedPart = nil
             loadLocal()
             maskImage = nil
+            rawMask = nil
             refreshMask()
         }
     }
+    /// The component of the selected mask being edited (nil: its last one).
+    @Published var selectedPart: Int?
     @Published private(set) var spots: [SpotInfo] = []
     @Published var brushSize = 0.03
     @Published var brushFeather = 50.0
@@ -83,6 +90,27 @@ final class EditorModel: ObservableObject {
     @Published var erasing = false
     @Published var spotSize = 0.015
     @Published var spotMode = "heal"
+    @Published var brushDensity = 100.0
+    /// Lightroom's Auto Mask: the brush keeps to the edges it meets.
+    @Published var autoMask = false
+    /// A tap with the colour picker adds a sample (Lightroom's ⇧-click) instead of starting over.
+    @Published var sampleAdd = false
+    /// The overlay's colour (one of `EditOverlay.overlayColors`) and opacity (0…100).
+    @Published var overlayColor = 0 { didSet { if overlayColor != oldValue { retint() } } }
+    @Published var overlayOpacity = 50.0 { didSet { if overlayOpacity != oldValue { retint() } } }
+    /// The selected mask as the engine drew it (white on black), before the overlay's colour.
+    private var rawMask: CGImage?
+    /// The uncropped photo and its depth, for the one-tap selections (made once per photo).
+    private var analyzed: (photo: Int64, image: CGImage, depth: DepthMap?)?
+    private var selectNewestPart = false
+    /// A stroke goes to the engine while it is painted (one undo step when the finger lifts).
+    private var strokeLive = false
+    /// A message for the user (a selection that found nothing…).
+    var onNotice: ((String) -> Void)?
+    /// Lightroom's Visualize Spots: the photo as its fine detail, so dust stands out.
+    @Published var visualizeSpots = false { didSet { if visualizeSpots != oldValue { refreshSpotMap() } } }
+    @Published var spotContrast = 50.0
+    @Published private(set) var spotMap: CGImage?
     /// The photo without its crop: the crop tool draws the crop over it.
     @Published private(set) var uncropped: CGImage?
     /// The uncropped image's width / height.
@@ -95,7 +123,17 @@ final class EditorModel: ObservableObject {
     @Published private(set) var lensBlur = LensBlurState()
     @Published private(set) var depthSource = ""
     @Published private(set) var depthImage: CGImage?
-    @Published var showDepth = false
+    @Published var showDepth = false { didSet { if showDepth != oldValue { refreshDepthView() } } }
+    /// How much of the scene lies at each distance (near → far), for the focal range.
+    @Published private(set) var depthHistogram: [Float] = []
+    /// The subject's depth (nearness, 0…1), the focus when none is set.
+    @Published private(set) var subjectDepth: Double?
+    /// Lens Blur's Refine brush: focus or blur, its size (fraction of the long edge), feather, flow.
+    @Published var refineFocus = true
+    @Published var refineSize = 0.04
+    @Published var refineFeather = 50.0
+    @Published var refineFlow = 100.0
+    private var mapCache: (key: String, map: DepthMap)?
     private var liveBlur: LensBlurState?
     private var depth: DepthMap?
     private var depthKey = ""
@@ -130,8 +168,13 @@ final class EditorModel: ObservableObject {
         case create(String, [String], (String?) -> Void)
         case local([String: Double])
         case cropDrag(String, CGPoint, CGPoint, CGRect)
-        case shape(Int, [String: Any])
+        case shape(Int, Int?, [String: Any])
         case stroke([CGPoint], [Float])
+        /// A piece of the stroke being painted (`connect`: it carries on from the last piece).
+        case liveStroke([CGPoint], [Float], Bool)
+        /// Engine commands as one change, drawn at once (`key`: a newer one with the same key
+        /// replaces one still waiting).
+        case edit([(String, [String: Any])], String)
         /// A setting kept with the photo that the engine does not draw (the lens blur): no new
         /// picture, no new panel, only the history.
         case quiet(String, [String: Any], String)
@@ -179,12 +222,19 @@ final class EditorModel: ObservableObject {
         uncropped = nil
         selectedMask = nil
         maskImage = nil
+        rawMask = nil
+        analyzed = nil
+        visualizeSpots = false
+        spotMap = nil
         working = nil
         masks = []
         spots = []
         depth = nil
         depthKey = ""
         depthImage = nil
+        depthHistogram = []
+        subjectDepth = nil
+        mapCache = nil
         clean = nil
         liveBlur = nil
         showDepth = false
@@ -228,6 +278,7 @@ final class EditorModel: ObservableObject {
     func setLensBlur(_ s: LensBlurState, live: Bool) {
         let was = (liveBlur ?? lensBlur).enabled
         if live { liveBlur = s } else { liveBlur = nil; lensBlur = s }
+        refreshDepthView()
         if s.enabled {
             if clean == nil || clean?.key != key, let p = loupe.pics[key], !p.filtered { clean = p }
             scheduleBlur()
@@ -237,13 +288,24 @@ final class EditorModel: ObservableObject {
         }
     }
 
+    /// The blur map of the picture on screen for `state` (made again only when the depth, the
+    /// settings or the crop changed).
+    private func blurMap(_ state: LensBlurState, aspect: CGFloat) -> DepthMap? {
+        guard let d = depth else { return nil }
+        let k = "\(depthKey)|\(state.focus ?? -1)|\(state.range)|\(state.refine.count)|\(state.refine.last?.points.count ?? 0)|\(crop.rect)|\(crop.angle)|\(aspect)"
+        if let m = mapCache, m.key == k { return m.map }
+        let m = LensBlurRenderer.blurMap(d, state, crop: crop, aspect: aspect)
+        mapCache = (k, m)
+        return m
+    }
+
     /// A zoomed-in window (`n`, 0…1 of the picture) with the lens blur, when it is on.
     func blurDetail(_ image: CGImage, window n: CGRect, full: CGSize) async -> CGImage? {
         let state = liveBlur ?? lensBlur
-        guard state.enabled, let d = depth else { return nil }
-        let part = d.sub(n)
+        guard state.enabled, let map = blurMap(state, aspect: full.width / max(full.height, 1)) else { return nil }
+        let part = map.sub(n)
         let ref = max(full.width, full.height)
-        return await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, depth: part, state, reference: ref) }.value
+        return await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, map: part, state, reference: ref) }.value
     }
 
     /// The lens blur into the photo's settings (one undo step). The engine does not draw it, so
@@ -256,17 +318,65 @@ final class EditorModel: ObservableObject {
         send(.quiet("develop.merge", ["settings": lensBlur.settings, "label": "Sfocatura obiettivo"], "Sfocatura obiettivo"))
         // the picture at full quality (a slider drag showed a lighter one)
         scheduleBlur()
+        refreshDepthView()
     }
 
     /// Focus where the photo was touched (0…1 of the picture on screen).
     func focus(at u: CGPoint) {
-        cursorTool = .none
         guard let d = depth else { return }
         var s = lensBlur
         s.focus = Double(d.at(u))
         s.enabled = true
         setLensBlur(s, live: false)
         commitLensBlur()
+    }
+
+    /// Lightroom's focus box: what the box holds is the focal range (`r`, 0…1 of the picture).
+    func focus(box r: CGRect) {
+        guard let d = depth else { return }
+        let part = d.sub(r).values.sorted()
+        guard part.count > 4 else { return }
+        let lo = part[part.count / 10], hi = part[part.count * 9 / 10]
+        var s = lensBlur
+        s.focus = Double((lo + hi) / 2)
+        s.range = max(0.03, Double(hi - lo) + 0.02)
+        s.enabled = true
+        setLensBlur(s, live: false)
+        commitLensBlur()
+    }
+
+    /// A Refine stroke (image coordinates): kept in focus or blurred, with the refine brush as set.
+    func refineStroke(_ points: [CGPoint]) {
+        guard !points.isEmpty else { return }
+        var s = lensBlur
+        s.refine.append(RefineStroke(points: points, size: refineSize, feather: refineFeather, flow: refineFlow, focus: refineFocus))
+        s.enabled = true
+        setLensBlur(s, live: false)
+        commitLensBlur()
+    }
+
+    /// The Refine strokes gone (one undo step).
+    func clearRefine() {
+        var s = lensBlur
+        guard !s.refine.isEmpty else { return }
+        s.refine = []
+        setLensBlur(s, live: false)
+        commitLensBlur()
+    }
+
+    /// Visualize Depth: the depth in colour, the focal band lighter.
+    private func refreshDepthView() {
+        guard showDepth, let d = depth, let p = clean else {
+            if !showDepth { depthImage = nil }
+            return
+        }
+        let s = liveBlur ?? lensBlur
+        let f = Float(s.focus ?? Double(d.subject)), r = Float(s.range)
+        let w = max(1, p.image.width / 2), h = max(1, p.image.height / 2)
+        Task {
+            let img = await Task.detached(priority: .userInitiated) { d.colored(width: w, height: h, focus: f, range: r) }.value
+            if showDepth { depthImage = img }
+        }
     }
 
     private func scheduleBlur() {
@@ -278,7 +388,7 @@ final class EditorModel: ObservableObject {
         blurBusy = true
         Breadcrumbs.mark("Sfocatura obiettivo")
         let state = liveBlur ?? lensBlur
-        // while a finger moves (a slider, a draft): half the pixels, a quarter of the work
+        // while a finger moves (a slider, a draft): half the pixels, and fewer samples
         let light = liveBlur != nil || p.draft
         let k = "\(photo)|\(crop.rect)|\(crop.angle)"
         Task {
@@ -290,18 +400,21 @@ final class EditorModel: ObservableObject {
                     depth = d
                     depthKey = k
                     depthSource = DepthEstimator.shared.source
-                    depthImage = d?.image.flatMap { stretched($0, width: max(1, p.image.width / 2), height: max(1, p.image.height / 2)) }
+                    depthHistogram = d?.histogram(64) ?? []
+                    subjectDepth = d.map { Double($0.subject) }
+                    refreshDepthView()
                 }
                 NSLog("lightcraft lensblur: depth \(Int(Date().timeIntervalSince(t0) * 1000)) ms (\(depthSource))")
             }
             var out = p
-            if let d = depth, state.enabled {
+            let aspect = CGFloat(p.image.width) / CGFloat(max(1, p.image.height))
+            if state.enabled, let map = blurMap(state, aspect: aspect) {
                 let img = p.image
                 let t1 = Date()
-                if let b = await Task.detached(priority: .userInitiated, operation: { LensBlurRenderer.apply(img, depth: d, state, scale: light ? 0.5 : 1) }).value {
+                if let b = await Task.detached(priority: .userInitiated, operation: { LensBlurRenderer.apply(img, map: map, state, scale: light ? 0.5 : 1, quality: light ? .live : .screen) }).value {
                     out = Pic(key: p.key, photo: p.photo, revision: p.revision, boxW: p.boxW, boxH: p.boxH, image: b, draft: p.draft || light)
                 }
-                NSLog("lightcraft lensblur: blur \(Int(Date().timeIntervalSince(t1) * 1000)) ms\(light ? " (light)" : "")")
+                NSLog("lightcraft lensblur: blur \(Int(Date().timeIntervalSince(t1) * 1000)) ms\(light ? " (light)" : "") \(Bokeh.shared == nil ? "CI" : "Metal")")
             }
             out.filtered = true
             if p.key == key { loupe.put(out) }
@@ -356,10 +469,41 @@ final class EditorModel: ObservableObject {
         let p = photo
         // half the viewer's size: a mask's edges are soft
         let (w, h) = (max(64, viewport.w / 2), max(64, viewport.h / 2))
+        let color = EditOverlay.overlayColors[overlayColor], opacity = overlayOpacity / 100
         maskTask = Task {
             guard let r = try? await engine.renderMask(p, mask: id, w, h), !Task.isCancelled, p == photo, selectedMask == id else { return }
-            let a = await Task.detached(priority: .userInitiated) { tintedMask(r.image) }.value
-            if !Task.isCancelled, p == photo, selectedMask == id { maskImage = a }
+            let img = r.image
+            let a = await Task.detached(priority: .userInitiated) { tintedMask(img, color: color, opacity: opacity) }.value
+            if !Task.isCancelled, p == photo, selectedMask == id {
+                rawMask = img
+                maskImage = a
+            }
+        }
+    }
+
+    /// The overlay in another colour or opacity (the mask itself is the same).
+    private func retint() {
+        guard let m = rawMask else { return }
+        let color = EditOverlay.overlayColors[overlayColor], opacity = overlayOpacity / 100
+        Task {
+            let a = await Task.detached(priority: .userInitiated) { tintedMask(m, color: color, opacity: opacity) }.value
+            if rawMask === m { maskImage = a }
+        }
+    }
+
+    // ---- Visualize Spots
+
+    /// The picture on screen as its detail (what differs from its surroundings), white on black:
+    /// sensor dust shows as small round marks.
+    func refreshSpotMap() {
+        guard visualizeSpots, let p = loupe.pics[key] else {
+            spotMap = nil
+            return
+        }
+        let img = p.image, k = spotContrast
+        Task {
+            let m = await Task.detached(priority: .userInitiated) { SpotMap.make(img, contrast: k) }.value
+            if visualizeSpots { spotMap = m }
         }
     }
 
@@ -369,16 +513,124 @@ final class EditorModel: ObservableObject {
     }
 
     func addMask(_ kind: String) {
-        selectNewest = true
-        let n = masks.filter { $0.kind == kind }.count + 1
-        let name = (MaskInfo(id: 0, name: "", kind: kind, visible: true, invert: false, adjust: [:], shape: [:]).label) + (n > 1 ? " \(n)" : "")
-        run("mask.add", ["kind": kind, "name": name])
-        switch kind {
-        case "brush": cursorTool = .paint
-        case "linear", "radial": cursorTool = .shape
-        case "colorRange": cursorTool = .sample
-        default: break
+        if Selections.kinds.contains(kind) {
+            addSelection(kind, op: nil)
+            return
         }
+        selectNewest = true
+        run("mask.add", ["kind": kind, "name": newMaskName(kind)])
+        cursorTool = EditorModel.tool(for: kind)
+    }
+
+    private func newMaskName(_ kind: String) -> String {
+        let n = masks.filter { $0.kind == kind }.count + 1
+        return MaskKinds.label(kind) + (n > 1 ? " \(n)" : "")
+    }
+
+    /// The cursor tool that draws a component of `kind` on the photo.
+    static func tool(for kind: String) -> CursorTool {
+        switch kind {
+        case "brush": return .paint
+        case "linear", "radial": return .shape
+        case "colorRange": return .sample
+        default: return .none
+        }
+    }
+
+    /// A component added to the selected mask (Lightroom's Add, Subtract, Intersect with).
+    func addPart(_ kind: String, op: String) {
+        guard let id = selectedMask else { return }
+        if Selections.kinds.contains(kind) {
+            addSelection(kind, op: op)
+            return
+        }
+        selectNewestPart = true
+        run("mask.addComponent", ["id": id, "op": op, "kind": kind])
+        cursorTool = EditorModel.tool(for: kind)
+    }
+
+    /// One component's menu: invert, duplicate, delete, or how it joins (add, subtract, intersect).
+    func partAction(_ index: Int, _ action: String, op: String? = nil) {
+        guard let id = selectedMask else { return }
+        var p: [String: Any] = ["id": id, "component": index, "action": action]
+        if let o = op { p["op"] = o }
+        if action == "delete" { selectedPart = nil }
+        run("mask.component", p)
+    }
+
+    func renameMask(_ id: Int, _ name: String) {
+        let n = name.trimmingCharacters(in: .whitespaces)
+        guard !n.isEmpty else { return }
+        run("mask.rename", ["id": id, "name": n])
+    }
+
+    /// Duplicate (and invert: Lightroom's Duplicate and Invert, the rest of the photo).
+    func duplicateMask(_ id: Int, invert: Bool) {
+        selectNewest = true
+        run("mask.duplicate", ["id": id, "invert": invert])
+    }
+
+    /// Refine Edges: the mask's edges snap to the photo's.
+    func setRefine(_ id: Int, _ v: Double) { run("mask.refine", ["id": id, "value": v]) }
+
+    /// A one-tap selection (subject, sky, background, people, a band of depth), worked out on the
+    /// iPad, as a new mask (`op` nil) or a component of the selected one.
+    func addSelection(_ kind: String, op: String?) {
+        guard photo != 0 else { return }
+        let p = photo
+        let mask = selectedMask
+        working = kind == "depthRange" ? "Misuro la profondità…" : "Cerco: \(MaskKinds.label(kind).lowercased())…"
+        Task {
+            defer { if photo == p { working = nil } }
+            guard let a = await analysis(), p == photo else { return }
+            let range = (near: 0.0, far: 0.3, feather: 0.1)
+            let cov: Coverage? = await Task.detached(priority: .userInitiated) {
+                switch kind {
+                case "people": return Selections.people(a.image)
+                case "sky": return Selections.sky(a.image, depth: a.depth)
+                case "background":
+                    return Selections.subject(a.image, depth: a.depth).map { c in Coverage(width: c.width, height: c.height, values: c.values.map { 1 - $0 }) }
+                case "depthRange": return a.depth.map { Selections.depthRange($0, near: range.near, far: range.far, feather: range.feather) }
+                default: return Selections.subject(a.image, depth: a.depth)
+                }
+            }.value
+            guard p == photo else { return }
+            guard let c = cov, let seg = await Task.detached(priority: .userInitiated, operation: { Selections.seg(c) }).value else {
+                onNotice?(kind == "depthRange" ? "La profondità non è disponibile" : "Nessun \(kind == "people" ? "volto o persona" : MaskKinds.label(kind).lowercased()) trovato")
+                return
+            }
+            let name = kind == "depthRange" ? Selections.depthName(near: range.near, far: range.far, feather: range.feather) : MaskKinds.label(kind)
+            if let o = op, let id = mask {
+                selectNewestPart = true
+                run("mask.addComponent", ["id": id, "op": o, "kind": "object", "seg": seg, "name": name])
+            } else {
+                selectNewest = true
+                run("mask.add", ["kind": "object", "seg": seg, "name": newMaskName(kind), "componentName": name])
+            }
+        }
+    }
+
+    /// The selected depth-range component's band changed (0 = nearest … 1 = farthest).
+    func setDepthRange(near: Double, far: Double, feather: Double) {
+        guard let id = selectedMask, let part = masks.first(where: { $0.id == id })?.part(selectedPart), let d = analyzed?.depth, analyzed?.photo == photo else { return }
+        let c = Selections.depthRange(d, near: near, far: far, feather: feather)
+        guard let seg = Selections.seg(c) else { return }
+        let shape: [String: Any] = ["kind": "object", "hint": [Any](), "seg": seg]
+        send(.edit([
+            ("mask.update", ["id": id, "component": part.index, "shape": shape]),
+            ("mask.component", ["id": id, "component": part.index, "action": "rename", "name": Selections.depthName(near: near, far: far, feather: feather)]),
+        ], "depth"))
+    }
+
+    /// The uncropped photo (and its depth) the selections are worked out on.
+    func analysis() async -> (image: CGImage, depth: DepthMap?)? {
+        if let a = analyzed, a.photo == photo { return (a.image, a.depth) }
+        let p = photo
+        guard let r = try? await engine.renderUncropped(p, 1024, 1024), p == photo else { return nil }
+        let d = await DepthEstimator.shared.estimate(r.image)
+        guard p == photo else { return nil }
+        analyzed = (p, r.image, d)
+        return (r.image, d)
     }
 
     func deleteMask(_ id: Int) {
@@ -389,27 +641,67 @@ final class EditorModel: ObservableObject {
     func setMaskVisible(_ id: Int, _ on: Bool) { run("mask.visible", ["id": id, "visible": on]) }
     func invertMask(_ id: Int) { run("mask.invert", ["id": id]) }
 
-    /// A gradient's shape while a handle moves (one undo step per drag, between begin and end).
-    func updateShape(_ id: Int, _ shape: [String: Any]) { send(.shape(id, shape)) }
+    /// The component being edited of mask `id` (its index).
+    private func partIndex(_ id: Int) -> Int? {
+        masks.first { $0.id == id }?.part(selectedPart)?.index
+    }
 
-    /// A brush stroke on the selected layer (image coordinates; pen pressure 0…1 per point).
+    /// A shape of the selected component while a handle moves (one undo step per drag, between
+    /// begin and end).
+    func updateShape(_ id: Int, _ shape: [String: Any]) { send(.shape(id, partIndex(id), shape)) }
+
+    /// A piece of the stroke being painted: it goes to the engine at once (the effect follows the
+    /// finger); the whole stroke is one undo step.
+    func strokePart(_ points: [CGPoint], pressure: [Float]) {
+        guard selectedMask != nil, !points.isEmpty else { return }
+        if !strokeLive {
+            strokeLive = true
+            send(.begin("Pennello"))
+            send(.liveStroke(points, pressure, false))
+        } else {
+            send(.liveStroke(points, pressure, true))
+        }
+    }
+
+    /// The stroke ends: its last piece (image coordinates; pen pressure 0…1 per point).
     func stroke(_ points: [CGPoint], pressure: [Float]) {
+        if strokeLive {
+            strokeLive = false
+            if !points.isEmpty { send(.liveStroke(points, pressure, true)) }
+            send(.end)
+            return
+        }
         guard selectedMask != nil, points.count > 0 else { return }
         send(.stroke(points, pressure))
     }
 
-    /// The colour range of the selected layer samples the colour at `p` (image coordinates).
+    /// The colour range of the selected component samples the colour at `p` (image coordinates).
     func sampleColor(_ p: CGPoint, add: Bool) {
         guard let id = selectedMask else { return }
-        run("mask.sampleColor", ["id": id, "x": Double(p.x), "y": Double(p.y), "add": add])
+        var params: [String: Any] = ["id": id, "x": Double(p.x), "y": Double(p.y), "add": add || sampleAdd]
+        if let k = partIndex(id), masks.first(where: { $0.id == id })?.part(k)?.kind == "colorRange" { params["component"] = k }
+        run("mask.sampleColor", params)
     }
 
-    func setLuminanceRange(_ id: Int, lo: Double, hi: Double) {
-        guard let m = masks.first(where: { $0.id == id }) else { return }
-        var s = m.shape
+    /// The selected luminance range: from `lo` to `hi` (0…1), each edge softened.
+    func setLuminanceRange(_ id: Int, lo: Double, hi: Double, loFeather: Double? = nil, hiFeather: Double? = nil) {
+        guard let part = masks.first(where: { $0.id == id })?.part(selectedPart) else { return }
+        var s = part.shape
         s["lo"] = lo
         s["hi"] = hi
+        if let f = loFeather { s["lo_feather"] = f }
+        if let f = hiFeather { s["hi_feather"] = f }
         updateShape(id, s)
+    }
+
+    /// A shape setting of the selected component (a colour range's Refine, a radial's feather…).
+    func setPartValue(_ id: Int, _ key: String, _ v: Any) {
+        guard let part = masks.first(where: { $0.id == id })?.part(selectedPart) else { return }
+        var s = part.shape
+        s[key] = v
+        send(.begin("Maschera"))
+        updateShape(id, s)
+        send(.end)
     }
 
     func addSpot(_ p: CGPoint) {
@@ -417,6 +709,17 @@ final class EditorModel: ObservableObject {
     }
 
     func deleteSpot(_ index: Int) { run("spot.delete", ["index": index]) }
+
+    /// The selected mask's adjustments back to none (its Amount to 100 %), one undo step.
+    func resetLocal() {
+        guard selectedMask != nil else { return }
+        var v: [String: Double] = [:]
+        for k in LocalControls.ids { v["local.\(k)"] = LocalControls.def(k) }
+        localStore.load(v)
+        send(.begin("Azzera maschera"))
+        send(.local(v))
+        send(.end)
+    }
 
     /// The selected layer's values into its sliders.
     private func loadLocal() {
@@ -426,7 +729,7 @@ final class EditorModel: ObservableObject {
             return
         }
         var v: [String: Double] = [:]
-        for k in LocalControls.ids { v["local.\(k)"] = m.adjust[k] ?? 0 }
+        for k in LocalControls.ids { v["local.\(k)"] = m.adjust[k] ?? LocalControls.def(k) }
         localStore.enabled = true
         localStore.load(v)
     }
@@ -453,14 +756,21 @@ final class EditorModel: ObservableObject {
         spots = SpotInfo.list(d)
         if selectNewest {
             selectNewest = false
-            selectedMask = masks.last?.id
+            // the newest has the highest id (a duplicate sits right after its original)
+            selectedMask = masks.max { $0.id < $1.id }?.id
         } else if let s = selectedMask, !masks.contains(where: { $0.id == s }) {
             selectedMask = nil
+        }
+        if selectNewestPart {
+            selectNewestPart = false
+            selectedPart = masks.first(where: { $0.id == selectedMask })?.parts.last?.index
+        } else if let k = selectedPart, masks.first(where: { $0.id == selectedMask })?.parts.contains(where: { $0.index == k }) != true {
+            selectedPart = nil
         }
         let aspect = masks.first(where: { $0.id == selectedMask })?.adjust
         if let a = aspect, !interacting {
             var v: [String: Double] = [:]
-            for k in LocalControls.ids { v["local.\(k)"] = a[k] ?? 0 }
+            for k in LocalControls.ids { v["local.\(k)"] = a[k] ?? LocalControls.def(k) }
             localStore.enabled = true
             localStore.load(v)
         }
@@ -566,6 +876,7 @@ final class EditorModel: ObservableObject {
 
     func pictureShown(_ p: Pic) {
         guard p.key == key, !p.draft else { return }
+        if visualizeSpots { refreshSpotMap() }
         let img = p.image
         Task {
             let h = await Task.detached(priority: .utility) { Histogram.of(img) }.value
@@ -588,6 +899,8 @@ final class EditorModel: ObservableObject {
         } else if case .cropDrag = op, case .cropDrag? = queue.last {
             queue[queue.count - 1] = op
         } else if case .shape = op, case .shape? = queue.last {
+            queue[queue.count - 1] = op
+        } else if case .edit(_, let k) = op, case .edit(_, let k0)? = queue.last, k == k0 {
             queue[queue.count - 1] = op
         } else {
             queue.append(op)
@@ -635,6 +948,8 @@ final class EditorModel: ObservableObject {
         case .local: label = "local"
         case .cropDrag: label = "cropDrag"
         case .shape: label = "shape"
+        case .liveStroke: label = "liveStroke"
+        case .edit(_, let k): label = "edit \(k)"
         case .quiet(let name, _, _): label = name
         }
         defer {
@@ -746,26 +1061,64 @@ final class EditorModel: ObservableObject {
                     return try e.execNow("develop.get", ["id": photo])
                 }
                 if let d = r as? [String: Any] { crop = CropState.from(d, aspect: imageAspect) }
-            case .shape(let mid, let shape):
+            case .shape(let mid, let comp, let shape):
                 let (w, h) = viewport
                 let draft = interacting
                 let wasHeld = held
                 loupe.held = key
+                var params: [String: Any] = ["id": mid, "shape": shape]
+                if let c = comp { params["component"] = c }
                 let r = try await engine.batch { e -> Rendered in
                     if !wasHeld { _ = try e.execNow("library.select", ["ids": [photo], "active": photo]) }
-                    _ = try e.execNow("mask.update", ["id": mid, "shape": shape])
+                    _ = try e.execNow("mask.update", params)
                     return try e.renderNow(photo, w, h, draft: draft)
                 }
-                if draft { show(r.image, draft: true) } else { await after(r.image) }
+                if draft {
+                    show(r.image, draft: true)
+                    refreshMask()
+                } else {
+                    await after(r.image)
+                }
+            case .liveStroke(let pts, let pressure, let connect):
+                guard let mid = selectedMask else { break }
+                let (w, h) = viewport
+                loupe.held = key
+                let params = strokeParams(mid, pts, pressure, connect: connect)
+                let r = try await engine.batch { e -> Rendered in
+                    _ = try e.execNow("mask.brushStroke", params)
+                    return try e.renderNow(photo, w, h, draft: true)
+                }
+                show(r.image, draft: true)
+                refreshMask()
+            case .edit(let commands, _):
+                let (w, h) = viewport
+                let draft = interacting
+                let wasHeld = held
+                if !wasHeld { await lock.lock() }
+                loupe.held = key
+                do {
+                    let r = try await engine.batch { e -> Rendered in
+                        _ = try e.execNow("library.select", ["ids": [photo], "active": photo])
+                        for (name, params) in commands { _ = try e.execNow(name, params) }
+                        return try e.renderNow(photo, w, h, draft: draft)
+                    }
+                    if !wasHeld { await lock.unlock() }
+                    if draft {
+                        show(r.image, draft: true)
+                        await loadState()
+                        refreshMask()
+                    } else {
+                        await after(r.image)
+                    }
+                } catch {
+                    if !wasHeld { await lock.unlock() }
+                    throw error
+                }
             case .stroke(let pts, let pressure):
                 guard let mid = selectedMask else { break }
                 await lock.lock()
                 loupe.held = key
-                var params: [String: Any] = [
-                    "id": mid, "points": pts.map { [Double($0.x), Double($0.y)] }, "size": brushSize,
-                    "feather": brushFeather, "flow": brushFlow, "erase": erasing,
-                ]
-                if pressure.contains(where: { $0 < 0.999 }) { params["pressure"] = pressure.map { Double($0) } }
+                let params = strokeParams(mid, pts, pressure, connect: false)
                 do {
                     _ = try await engine.batch { e in
                         _ = try e.execNow("library.select", ["ids": [photo], "active": photo])
@@ -814,6 +1167,17 @@ final class EditorModel: ObservableObject {
                 await lock.unlock()
             }
         }
+    }
+
+    /// A brush stroke's parameters: the brush as set, into the component being edited.
+    private func strokeParams(_ mid: Int, _ pts: [CGPoint], _ pressure: [Float], connect: Bool) -> [String: Any] {
+        var params: [String: Any] = [
+            "id": mid, "points": pts.map { [Double($0.x), Double($0.y)] }, "size": brushSize,
+            "feather": brushFeather, "flow": brushFlow, "density": brushDensity, "erase": erasing, "autoMask": autoMask, "connect": connect,
+        ]
+        if let k = partIndex(mid), masks.first(where: { $0.id == mid })?.part(k)?.kind == "brush" { params["component"] = k }
+        if pressure.contains(where: { $0 < 0.999 }) { params["pressure"] = pressure.map { Double($0) } }
+        return params
     }
 
     private func show(_ image: CGImage, draft: Bool) {

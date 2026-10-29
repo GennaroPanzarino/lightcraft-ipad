@@ -66,56 +66,107 @@ func aspectName(_ a: String) -> String {
     }
 }
 
-/// One of the photo's masks (Capture One's layers), as `develop.get` lists them.
-struct MaskInfo: Identifiable, Equatable {
-    let id: Int
-    let name: String
-    let kind: String
-    let visible: Bool
-    let invert: Bool
-    let adjust: [String: Double]
-    /// The first component's shape, as JSON.
-    let shape: [String: Any]
-
-    static func == (a: MaskInfo, b: MaskInfo) -> Bool {
-        a.id == b.id && a.name == b.name && a.kind == b.kind && a.visible == b.visible && a.invert == b.invert && a.adjust == b.adjust
-            && NSDictionary(dictionary: a.shape).isEqual(to: b.shape)
-    }
-
-    var label: String {
+/// What a mask (or one of its components) selects, as the panel names and draws it.
+enum MaskKinds {
+    static func label(_ kind: String) -> String {
         switch kind {
         case "brush": return "Pennello"
         case "linear": return "Gradiente lineare"
         case "radial": return "Gradiente radiale"
         case "luminanceRange": return "Gamma luminanza"
         case "colorRange": return "Gamma colore"
+        case "depthRange": return "Gamma profondità"
         case "sky": return "Cielo"
         case "subject": return "Soggetto"
+        case "background": return "Sfondo"
+        case "people": return "Persone"
+        case "object": return "Selezione"
         default: return kind
         }
     }
 
-    var icon: String {
+    static func icon(_ kind: String) -> String {
         switch kind {
         case "brush": return "paintbrush.pointed"
         case "linear": return "square.split.diagonal"
         case "radial": return "circle.dashed"
         case "luminanceRange": return "sun.max"
         case "colorRange": return "eyedropper"
-        default: return "square.on.square"
+        case "depthRange": return "square.3.layers.3d.down.right"
+        case "sky": return "cloud.sun"
+        case "subject": return "person.crop.square"
+        case "background": return "photo"
+        case "people": return "person.2"
+        default: return "wand.and.stars"
         }
+    }
+}
+
+/// One component of a mask: what it selects and how it joins the ones above it (Lightroom's Add,
+/// Subtract, Intersect).
+struct MaskPart: Equatable {
+    let index: Int
+    let name: String
+    let op: String
+    let invert: Bool
+    let kind: String
+    let shape: [String: Any]
+
+    static func == (a: MaskPart, b: MaskPart) -> Bool {
+        a.index == b.index && a.name == b.name && a.op == b.op && a.invert == b.invert && a.kind == b.kind
+            && NSDictionary(dictionary: a.shape).isEqual(to: b.shape)
+    }
+
+    /// What the app made from a selection of its own (subject, sky, people, depth) is stored as a
+    /// segmentation under that name.
+    var shownKind: String {
+        guard kind == "object" else { return kind }
+        let n = name.lowercased()
+        for k in ["subject", "sky", "background", "people", "depthRange"] where n.hasPrefix(MaskKinds.label(k).lowercased()) { return k }
+        return kind
+    }
+
+    var label: String { name.isEmpty ? MaskKinds.label(kind) : name }
+    var icon: String { MaskKinds.icon(shownKind) }
+}
+
+/// One of the photo's masks (Lightroom's), as `develop.get` lists them.
+struct MaskInfo: Identifiable, Equatable {
+    let id: Int
+    let name: String
+    let visible: Bool
+    let invert: Bool
+    let adjust: [String: Double]
+    /// Refine Edges, 0…100.
+    let refine: Double
+    let parts: [MaskPart]
+
+    /// The first component's kind and shape (what the mask is, at a glance).
+    var kind: String { parts.first?.shownKind ?? "" }
+    var shape: [String: Any] { parts.first?.shape ?? [:] }
+    var label: String { MaskKinds.label(kind) }
+    var icon: String { parts.first?.icon ?? "square.on.square" }
+
+    /// The mask with `part`'s shape in front (the gradient handles on the photo are that one's).
+    func part(_ i: Int?) -> MaskPart? {
+        guard let i = i else { return parts.last }
+        return parts.first { $0.index == i } ?? parts.last
     }
 
     static func list(_ develop: [String: Any]) -> [MaskInfo] {
         (develop["masks"] as? [[String: Any]] ?? []).map { m in
             let comps = m["components"] as? [[String: Any]] ?? []
-            let shape = comps.first?["shape"] as? [String: Any] ?? [:]
+            let parts = comps.enumerated().map { i, c -> MaskPart in
+                let shape = c["shape"] as? [String: Any] ?? [:]
+                return MaskPart(index: i, name: c.str("name"), op: c.str("op").isEmpty ? "add" : c.str("op"), invert: (c["invert"] as? Bool) ?? false,
+                                kind: shape.str("kind"), shape: shape)
+            }
             var adjust: [String: Double] = [:]
             for (k, v) in m["adjust"] as? [String: Any] ?? [:] { if let n = v as? NSNumber { adjust[k] = n.doubleValue } }
             return MaskInfo(
-                id: Int(int64(m["id"])), name: m.str("name"), kind: shape.str("kind"),
+                id: Int(int64(m["id"])), name: m.str("name"),
                 visible: (m["visible"] as? Bool) ?? true, invert: (m["invert"] as? Bool) ?? false,
-                adjust: adjust, shape: shape
+                adjust: adjust, refine: double(m["refine"]), parts: parts
             )
         }
     }
@@ -140,26 +191,45 @@ struct SpotInfo: Equatable {
     }
 }
 
-/// The local adjustments a mask can carry (Capture One's layer sliders), as controls the sliders take.
+/// The local adjustments a mask can carry (Lightroom's mask sliders), as controls the sliders take.
 enum LocalControls {
-    static let ids = ["exposure", "contrast", "highlights", "shadows", "whites", "blacks", "temp", "tint", "saturation", "clarity", "texture", "dehaze", "sharpness", "noise", "moire", "defringe"]
+    static let ids = ["amount", "exposure", "contrast", "highlights", "shadows", "whites", "blacks", "temp", "tint", "hue", "saturation", "color_hue", "color_sat",
+                      "clarity", "texture", "dehaze", "sharpness", "noise", "moire", "defringe"]
+
+    /// What a slider shows before it is touched (the mask's Amount is 100 %).
+    static func def(_ id: String) -> Double { id == "amount" ? 100 : 0 }
 
     static let all: [String: Control] = {
         let names = [
-            "exposure": "Esposizione", "contrast": "Contrasto", "highlights": "Alteluci", "shadows": "Ombre", "whites": "Bianco",
-            "blacks": "Nero", "temp": "Temperatura", "tint": "Tinta", "saturation": "Saturazione", "clarity": "Chiarezza",
-            "texture": "Struttura", "dehaze": "Dehaze", "sharpness": "Nitidezza", "noise": "Rumore", "moire": "Moiré", "defringe": "Frange",
+            "amount": "Quantità", "exposure": "Esposizione", "contrast": "Contrasto", "highlights": "Alteluci", "shadows": "Ombre", "whites": "Bianco",
+            "blacks": "Nero", "temp": "Temperatura", "tint": "Tinta", "hue": "Tonalità", "saturation": "Saturazione", "color_hue": "Colore",
+            "color_sat": "Intensità colore", "clarity": "Chiarezza", "texture": "Struttura", "dehaze": "Dehaze", "sharpness": "Nitidezza", "noise": "Rumore",
+            "moire": "Moiré", "defringe": "Frange",
         ]
         var m: [String: Control] = [:]
         for id in ids {
-            let exp = id == "exposure"
-            let track: Track
+            let c: Control
             switch id {
-            case "temp": track = .gradient([UIColor(hex: 0x3B6FD8), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xE8B83A)])
-            case "tint": track = .gradient([UIColor(hex: 0x3FAE5A), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xD94FB0)])
-            default: track = .centered
+            case "amount":
+                c = Control(id: "local.amount", label: "Quantità", min: 0, max: 200, def: 100, step: 1, decimals: 0, track: .plain)
+            case "exposure":
+                c = Control(id: "local.exposure", label: "Esposizione", min: -4, max: 4, def: 0, step: 0.01, decimals: 2, track: .centered)
+            case "color_hue":
+                let hues = stride(from: 0.0, through: 1.0, by: 1.0 / 12).map { UIColor(hue: CGFloat($0), saturation: 0.8, brightness: 0.9, alpha: 1) }
+                c = Control(id: "local.color_hue", label: "Colore", min: 0, max: 360, def: 0, step: 1, decimals: 0, track: .gradient(hues))
+            case "color_sat":
+                c = Control(id: "local.color_sat", label: "Intensità colore", min: 0, max: 100, def: 0, step: 1, decimals: 0, track: .plain)
+            default:
+                let track: Track
+                switch id {
+                case "temp": track = .gradient([UIColor(hex: 0x3B6FD8), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xE8B83A)])
+                case "tint": track = .gradient([UIColor(hex: 0x3FAE5A), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xD94FB0)])
+                case "hue": track = .gradient([UIColor(hex: 0x3E7BE6), UIColor(hex: 0x46B85A), UIColor(hex: 0xF2D14A), UIColor(hex: 0xE5484D), UIColor(hex: 0xD94FB0)])
+                default: track = .centered
+                }
+                c = Control(id: "local.\(id)", label: names[id] ?? id, min: -100, max: 100, def: 0, step: 1, decimals: 0, track: track)
             }
-            m["local.\(id)"] = Control(id: "local.\(id)", label: names[id] ?? id, min: exp ? -4 : -100, max: exp ? 4 : 100, def: 0, step: exp ? 0.01 : 1, decimals: exp ? 2 : 0, track: track)
+            m["local.\(id)"] = c
         }
         return m
     }()

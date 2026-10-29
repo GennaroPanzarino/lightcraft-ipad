@@ -342,7 +342,7 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     /// A cursor tool on the photo: one finger is the tool's, two fingers still move and zoom.
     func setTool(_ tool: CursorTool) {
         overlay.mode = tool
-        let drawing = [.spot, .paint, .shape, .sample, .focus].contains(tool)
+        let drawing = [.spot, .paint, .shape, .sample, .focus, .refine].contains(tool)
         scroll.panGestureRecognizer.minimumNumberOfTouches = drawing ? 2 : 1
         paging.isEnabled = !drawing
         // taps on the photo are the tool's (a spot, a colour, the focus): the viewer's own tap
@@ -460,7 +460,10 @@ struct ViewerHost: UIViewRepresentable {
         v.overlay.onSpot = { p in ed.addSpot(p) }
         v.overlay.onSample = { p in ed.sampleColor(p, add: false) }
         v.overlay.onFocus = { u in ed.focus(at: u) }
+        v.overlay.onFocusBox = { r in ed.focus(box: r) }
+        v.overlay.onRefine = { pts in ed.refineStroke(pts) }
         v.overlay.onStrokeBegin = { ed.strokeBegan() }
+        v.overlay.onStrokeMove = { pts, pr in ed.strokePart(pts, pressure: pr) }
         v.overlay.onStroke = { pts, pr in ed.stroke(pts, pressure: pr) }
         v.overlay.onShapeBegin = { ed.strokeBegan(); ed.begin("Maschera") }
         v.overlay.onShape = { s in if let id = ed.selectedMask { ed.updateShape(id, s) } }
@@ -499,10 +502,12 @@ struct ViewerHost: UIViewRepresentable {
         v.setTool(ed.cursorTool)
         v.overlay.crop = ed.crop
         v.overlay.spots = ed.spots
-        v.overlay.maskInfo = ed.masks.first { $0.id == ed.selectedMask }
+        v.overlay.partShape = ed.masks.first { $0.id == ed.selectedMask }?.part(ed.selectedPart)?.shape ?? [:]
+        v.overlay.overlayColor = ed.overlayColor
+        v.overlay.overlayOpacity = ed.overlayOpacity / 100
         v.overlay.maskImage = ed.maskImage
         v.overlay.showMask = ed.maskOverlayShown
-        v.overlay.brushSize = CGFloat(ed.brushSize)
+        v.overlay.brushSize = CGFloat(ed.cursorTool == .refine ? ed.refineSize : ed.brushSize)
         v.overlay.spotSize = CGFloat(ed.spotSize)
         v.overlay.erasing = ed.erasing
     }

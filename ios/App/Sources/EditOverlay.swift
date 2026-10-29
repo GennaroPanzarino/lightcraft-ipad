@@ -9,7 +9,7 @@ import UIKit
 final class EditOverlay: UIView {
     var mode: CursorTool = .none {
         didSet {
-            isUserInteractionEnabled = [.spot, .paint, .shape, .sample, .focus].contains(mode)
+            isUserInteractionEnabled = [.spot, .paint, .shape, .sample, .focus, .refine].contains(mode)
             if mode != oldValue {
                 pendingSpots = []
                 if mode != .paint { painted = [] }
@@ -26,7 +26,10 @@ final class EditOverlay: UIView {
             redraw()
         }
     }
-    var maskInfo: MaskInfo? { didSet { if maskInfo != oldValue && dragging == nil { redraw() } } }
+    /// The shape of the component being edited (a gradient's handles are drawn from it).
+    var partShape: [String: Any] = [:] {
+        didSet { if !NSDictionary(dictionary: partShape).isEqual(to: oldValue) && dragging == nil { redraw() } }
+    }
     /// Where the selected layer acts, already in the overlay's red ([`tintedMask`]).
     var maskImage: CGImage? {
         didSet {
@@ -45,18 +48,33 @@ final class EditOverlay: UIView {
     }
     var brushSize: CGFloat = 0.03
     var spotSize: CGFloat = 0.015
-    var erasing = false { didSet { stroke.strokeColor = (erasing ? EditOverlay.eraseColor : EditOverlay.maskColor).cgColor } }
-    static let maskColor = UIColor(red: 1, green: 0.16, blue: 0.16, alpha: 0.48)
+    var erasing = false { didSet { if erasing != oldValue { paintColors() } } }
+    /// The overlay's colour (an index of `overlayColors`) and opacity (0…1).
+    var overlayColor = 0 { didSet { if overlayColor != oldValue { paintColors() } } }
+    var overlayOpacity = 0.5 { didSet { if overlayOpacity != oldValue { paintColors() } } }
+    /// Lightroom's overlay colours: red, green, blue, white, black.
+    static let overlayColors: [(r: Double, g: Double, b: Double)] = [(1, 0.16, 0.16), (0.2, 0.85, 0.3), (0.2, 0.45, 1), (1, 1, 1), (0, 0, 0)]
     static let eraseColor = UIColor(white: 1, alpha: 0.4)
+    private var maskColor: UIColor {
+        let c = EditOverlay.overlayColors[max(0, min(EditOverlay.overlayColors.count - 1, overlayColor))]
+        return UIColor(red: c.r, green: c.g, blue: c.b, alpha: max(0.25, overlayOpacity))
+    }
     /// How far the photo is zoomed in (lines keep their width on screen).
     var zoom: CGFloat = 1 { didSet { if abs(zoom - oldValue) > 0.01 { redraw() } } }
 
     var onSpot: ((CGPoint) -> Void)?
     var onStrokeBegin: (() -> Void)?
+    /// Pieces of the stroke while it is painted (image coordinates), then its end (`onStroke`, the
+    /// points not sent yet).
+    var onStrokeMove: (([CGPoint], [Float]) -> Void)?
     var onStroke: (([CGPoint], [Float]) -> Void)?
     var onSample: ((CGPoint) -> Void)?
     /// A tap with the focus tool: where, in the picture on screen (0…1).
     var onFocus: ((CGPoint) -> Void)?
+    /// A box drawn with the focus tool (Lightroom's focus range from a box), 0…1 of the picture.
+    var onFocusBox: ((CGRect) -> Void)?
+    /// A Refine stroke of the lens blur (image coordinates).
+    var onRefine: (([CGPoint]) -> Void)?
     var onShapeBegin: (() -> Void)?
     var onShape: (([String: Any]) -> Void)?
     var onShapeEnd: (() -> Void)?
@@ -75,8 +93,15 @@ final class EditOverlay: UIView {
     private var pendingSpots: [CGPoint] = []
     private var points: [CGPoint] = []
     private var pressure: [Float] = []
+    /// How many of the stroke's points have gone to the engine, and when the last piece went.
+    private var sent = 0
+    private var sentAt: CFTimeInterval = 0
+    /// A piece of the stroke goes out this often while it is painted.
+    static let strokePiece: CFTimeInterval = 0.07
     private var downAt = CGPoint.zero
     private var moved = false
+    /// The focus tool's box while a finger draws it (points of this view).
+    private var focusBox: CGRect?
     /// The handle a finger holds, and the shape as it was when it took it.
     private var dragging: String?
     private var shapeAtStart: [String: Any] = [:]
@@ -92,11 +117,10 @@ final class EditOverlay: UIView {
         spotLayer.fillColor = UIColor.white.withAlphaComponent(0.08).cgColor
         spotLayer.strokeColor = UIColor.white.cgColor
         stroke.fillColor = UIColor.clear.cgColor
-        stroke.strokeColor = EditOverlay.maskColor.cgColor
         stroke.lineCap = .round
         stroke.lineJoin = .round
-        paintedLayer.fillColor = EditOverlay.maskColor.cgColor
         erasedLayer.fillColor = EditOverlay.eraseColor.cgColor
+        paintColors()
         guides.fillColor = UIColor.clear.cgColor
         guides.strokeColor = UIColor.white.withAlphaComponent(0.9).cgColor
         handles.fillColor = UIColor.white.cgColor
@@ -110,6 +134,11 @@ final class EditOverlay: UIView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    private func paintColors() {
+        stroke.strokeColor = (erasing ? EditOverlay.eraseColor : maskColor).cgColor
+        paintedLayer.fillColor = maskColor.cgColor
+    }
 
     override func layoutSubviews() {
         super.layoutSubviews()
@@ -177,7 +206,7 @@ final class EditOverlay: UIView {
         // gradients
         let g = UIBezierPath()
         let h = UIBezierPath()
-        let shape = working ?? maskInfo?.shape ?? [:]
+        let shape = working ?? partShape
         if mode == .shape {
             let k: CGFloat = 7 / zoom
             func knob(_ p: CGPoint) { h.append(UIBezierPath(ovalIn: CGRect(x: p.x - k, y: p.y - k, width: 2 * k, height: 2 * k))) }
@@ -216,6 +245,11 @@ final class EditOverlay: UIView {
         }
         guides.path = g.cgPath
         handles.path = h.cgPath
+        // the focus box being drawn
+        if mode == .focus, moved, let b = focusBox {
+            g.append(UIBezierPath(rect: b))
+            guides.path = g.cgPath
+        }
         // the stroke being painted
         let s = UIBezierPath()
         if let f = points.first {
@@ -235,10 +269,13 @@ final class EditOverlay: UIView {
         let p = t.location(in: self)
         downAt = p
         moved = false
+        focusBox = nil
         switch mode {
-        case .paint:
+        case .paint, .refine:
             points = [p]
             pressure = [force(t)]
+            sent = 0
+            sentAt = CACurrentMediaTime()
             onStrokeBegin?()
             redraw()
         case .shape:
@@ -252,6 +289,17 @@ final class EditOverlay: UIView {
         let p = t.location(in: self)
         if hypot(p.x - downAt.x, p.y - downAt.y) > 6 / zoom { moved = true }
         switch mode {
+        case .focus:
+            if moved {
+                focusBox = CGRect(x: min(p.x, downAt.x), y: min(p.y, downAt.y), width: abs(p.x - downAt.x), height: abs(p.y - downAt.y))
+                redraw()
+            }
+        case .refine:
+            for c in event?.coalescedTouches(for: t) ?? [t] {
+                points.append(c.location(in: self))
+                pressure.append(force(c))
+            }
+            redraw()
         case .paint:
             // every sample the Pencil gave since the last frame
             for c in event?.coalescedTouches(for: t) ?? [t] {
@@ -259,6 +307,14 @@ final class EditOverlay: UIView {
                 pressure.append(force(c))
             }
             redraw()
+            // the engine paints along, a piece at a time
+            let now = CACurrentMediaTime()
+            if now - sentAt >= EditOverlay.strokePiece && points.count > sent {
+                sentAt = now
+                let piece = points[sent...].map(toImage), pr = Array(pressure[sent...])
+                sent = points.count
+                onStrokeMove?(piece, pr)
+            }
         case .shape:
             moveHandle(to: p)
         default: break
@@ -270,13 +326,14 @@ final class EditOverlay: UIView {
         let p = t.location(in: self)
         switch mode {
         case .paint:
-            let pts = points.map(toImage)
-            let pr = pressure
-            if let path = stroke.path, !pts.isEmpty { painted.append((path, stroke.lineWidth, erasing)) }
+            let rest = points.count > sent ? points[sent...].map(toImage) : []
+            let pr = points.count > sent ? Array(pressure[sent...]) : []
+            if let path = stroke.path, !points.isEmpty { painted.append((path, stroke.lineWidth, erasing)) }
             points = []
             pressure = []
+            sent = 0
             redraw()
-            if !pts.isEmpty { onStroke?(pts, pr) }
+            onStroke?(rest, pr)
         case .spot:
             if !moved {
                 let q = toImage(p)
@@ -288,7 +345,20 @@ final class EditOverlay: UIView {
         case .sample:
             if !moved { onSample?(toImage(p)) }
         case .focus:
-            if !moved { onFocus?(CGPoint(x: p.x / max(bounds.width, 1), y: p.y / max(bounds.height, 1))) }
+            let w = max(bounds.width, 1), h = max(bounds.height, 1)
+            if moved, let b = focusBox, b.width > 8, b.height > 8 {
+                onFocusBox?(CGRect(x: b.minX / w, y: b.minY / h, width: b.width / w, height: b.height / h))
+            } else {
+                onFocus?(CGPoint(x: p.x / w, y: p.y / h))
+            }
+            focusBox = nil
+            redraw()
+        case .refine:
+            let pts = points.map(toImage)
+            points = []
+            pressure = []
+            redraw()
+            onRefine?(pts)
         case .shape:
             if dragging != nil {
                 dragging = nil
@@ -301,8 +371,12 @@ final class EditOverlay: UIView {
     }
 
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
+        // a stroke already partly painted ends where it got to (a second finger took over)
+        if mode == .paint && sent > 0 { onStroke?([], []) }
         points = []
         pressure = []
+        sent = 0
+        focusBox = nil
         if dragging != nil {
             dragging = nil
             working = nil
@@ -319,7 +393,8 @@ final class EditOverlay: UIView {
     // MARK: gradient handles
 
     private func grabHandle(at p: CGPoint) {
-        guard let shape = maskInfo?.shape else { return }
+        let shape = partShape
+        guard !shape.isEmpty else { return }
         var best: (String, CGFloat)?
         func consider(_ name: String, _ q: CGPoint) {
             let d = hypot(q.x - p.x, q.y - p.y)
@@ -393,21 +468,22 @@ final class EditOverlay: UIView {
     }
 }
 
-/// A layer's mask as the engine draws it (white on black) in the overlay's red: premultiplied,
-/// 48 % at most, so the photo shows through.
-func tintedMask(_ image: CGImage) -> CGImage? {
+/// A mask as the engine draws it (white on black) in the overlay's colour: premultiplied, at
+/// `opacity` (0…1) where the mask is full, so the photo shows through.
+func tintedMask(_ image: CGImage, color: (r: Double, g: Double, b: Double), opacity: Double) -> CGImage? {
     let w = image.width, h = image.height
     guard w > 0, h > 0, let space = CGColorSpace(name: CGColorSpace.sRGB),
           let ctx = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: space, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
     else { return nil }
     ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
     guard let base = ctx.data?.assumingMemoryBound(to: UInt8.self) else { return nil }
+    let k = UInt32(max(0, min(1, opacity)) * 255)
+    let (cr, cg, cb) = (UInt32(color.r * 255), UInt32(color.g * 255), UInt32(color.b * 255))
     for i in 0..<(w * h) {
-        let a = UInt32(base[i * 4]) * 122 / 255
-        let gb = UInt8(a * 41 / 255)
-        base[i * 4] = UInt8(a)
-        base[i * 4 + 1] = gb
-        base[i * 4 + 2] = gb
+        let a = UInt32(base[i * 4]) * k / 255
+        base[i * 4] = UInt8(a * cr / 255)
+        base[i * 4 + 1] = UInt8(a * cg / 255)
+        base[i * 4 + 2] = UInt8(a * cb / 255)
         base[i * 4 + 3] = UInt8(a)
     }
     return ctx.makeImage()

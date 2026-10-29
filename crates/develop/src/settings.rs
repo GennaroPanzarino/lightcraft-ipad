@@ -1092,13 +1092,35 @@ impl Default for RedEye {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LensBlur {
     pub enabled: bool,
     pub amount: f64,
     pub focal_distance: f64,
     pub focal_range: f64,
+    /// The out-of-focus highlights' shape (Lightroom's Bokeh): "" (a circle), "bubble",
+    /// "blade5", "ring" or "cateye".
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub bokeh: String,
+    /// How much the bright out-of-focus highlights stand out (Lightroom's Boost), 0..100.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub boost: f64,
+    /// Lightroom's Refine brushes: parts kept in focus or blurred whatever their depth.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub refine: Vec<LensBlurStroke>,
+}
+
+/// A stroke of Lens Blur's Refine brushes: normalized image points, the brush's radius (fraction
+/// of the long edge), feather and flow (0..100), and whether it brings into focus or blurs.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LensBlurStroke {
+    pub points: Vec<[f64; 2]>,
+    pub size: f64,
+    pub feather: f64,
+    pub flow: f64,
+    pub focus: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]

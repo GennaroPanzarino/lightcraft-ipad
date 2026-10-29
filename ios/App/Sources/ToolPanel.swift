@@ -817,8 +817,10 @@ private struct ColorEditorTool: View {
 
 // MARK: - Lens blur
 
-/// Lightroom's Lens Blur: the scene's depth from the Neural Engine, what stays sharp around the focus,
-/// how much the rest melts.
+/// Lightroom's Lens Blur: the scene's depth from the Neural Engine; how much the rest melts and the
+/// shape and glow of its highlights (Bokeh, Boost); what stays sharp (the focal range, picked on
+/// its histogram, with a tap or a box on the photo); the parts painted in focus or blurred
+/// (Refine); the depth shown in colour.
 private struct LensBlurTool: View {
     @ObservedObject var ed: EditorModel
 
@@ -832,27 +834,38 @@ private struct LensBlurTool: View {
                 ed.commitLensBlur()
             }
             Group {
-                ValueSlider(control: Control(id: "lb.amount", label: "Quantità", min: 1, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
-                            value: s.amount,
-                            onChange: { v in var n = ed.lensBlur; n.amount = v; ed.setLensBlur(n, live: true) },
-                            onEnd: { ed.commitLensBlur() })
-                    .frame(height: ToolSlider.height)
-                ValueSlider(control: Control(id: "lb.focus", label: "Messa a fuoco", min: 0, max: 100, def: 85, step: 1, decimals: 0, track: .gradient([UIColor(hex: 0x30343C), UIColor(hex: 0xE8E8EA)])),
-                            value: (s.focus ?? 0.85) * 100,
-                            onChange: { v in var n = ed.lensBlur; n.focus = v / 100; ed.setLensBlur(n, live: true) },
-                            onEnd: { ed.commitLensBlur() })
-                    .frame(height: ToolSlider.height)
-                ValueSlider(control: Control(id: "lb.range", label: "Profondità", min: 2, max: 100, def: 18, step: 1, decimals: 0, track: .plain),
-                            value: s.range * 100,
-                            onChange: { v in var n = ed.lensBlur; n.range = v / 100; ed.setLensBlur(n, live: true) },
-                            onEnd: { ed.commitLensBlur() })
-                    .frame(height: ToolSlider.height)
+                blurSlider("lb.amount", "Quantità sfocatura", 1, 100, 50, s.amount) { n, v in n.amount = v }
+                SubHeader(title: "Effetto bokeh")
                 HStack(spacing: 6) {
-                    FlatButton(title: ed.cursorTool == .focus ? "Tocca la foto" : "Fuoco al tocco", icon: "scope", prominent: ed.cursorTool == .focus) {
+                    ForEach(LensBlurState.shapes, id: \.0) { shape in
+                        Button {
+                            var n = ed.lensBlur
+                            n.bokeh = shape.0
+                            ed.setLensBlur(n, live: false)
+                            ed.commitLensBlur()
+                        } label: {
+                            BokehIcon(shape: shape.0)
+                                .frame(width: 20, height: 20)
+                                .foregroundColor(s.bokeh == shape.0 ? Color.black : Lc.text)
+                                .frame(maxWidth: .infinity, minHeight: 38)
+                                .background(s.bokeh == shape.0 ? Lc.accent : Lc.raised)
+                                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+                        }
+                        .buttonStyle(PressStyle())
+                    }
+                }
+                Text(LensBlurState.shapes.first { $0.0 == s.bokeh }?.1 ?? "Cerchio").font(Typo.caption).foregroundColor(Lc.text3).padding(.top, 3)
+                blurSlider("lb.boost", "Intensità luci", 0, 100, 0, s.boost) { n, v in n.boost = v }
+                SubHeader(title: "Gamma focale")
+                FocalRange(ed: ed)
+                    .frame(height: 58)
+                    .padding(.vertical, 4)
+                HStack(spacing: 6) {
+                    FlatButton(title: ed.cursorTool == .focus ? "Tocca o traccia" : "Punto di fuoco", icon: "scope", prominent: ed.cursorTool == .focus) {
                         ed.picking = false
                         ed.cursorTool = ed.cursorTool == .focus ? .none : .focus
                     }
-                    FlatButton(title: "Soggetto", icon: "person.crop.rectangle") {
+                    FlatButton(title: "Soggetto", icon: "person.crop.rectangle", prominent: s.focus == nil) {
                         var n = ed.lensBlur
                         n.focus = nil
                         ed.setLensBlur(n, live: false)
@@ -860,7 +873,29 @@ private struct LensBlurTool: View {
                     }
                 }
                 .padding(.vertical, 4)
-                ToggleRow(label: "Mostra la profondità", on: ed.showDepth) { ed.showDepth = $0 }
+                ToggleRow(label: "Visualizza profondità", on: ed.showDepth) { ed.showDepth = $0 }
+                SubHeader(title: "Rifinisci")
+                Segment(options: ["Fuoco", "Sfocatura"], selected: ed.refineFocus ? 0 : 1) { ed.refineFocus = $0 == 0 }
+                    .padding(.bottom, 4)
+                FlatButton(title: ed.cursorTool == .refine ? "Pennello attivo" : "Dipingi sulla foto", icon: "paintbrush.pointed", prominent: ed.cursorTool == .refine) {
+                    ed.picking = false
+                    ed.cursorTool = ed.cursorTool == .refine ? .none : .refine
+                }
+                if ed.cursorTool == .refine {
+                    ValueSlider(control: Control(id: "lb.size", label: "Dimensione", min: 0.5, max: 25, def: 4, step: 0.1, decimals: 1, track: .plain),
+                                value: ed.refineSize * 100, onChange: { ed.refineSize = $0 / 100 })
+                        .frame(height: ToolSlider.height)
+                    ValueSlider(control: Control(id: "lb.feather", label: "Sfumatura", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
+                                value: ed.refineFeather, onChange: { ed.refineFeather = $0 })
+                        .frame(height: ToolSlider.height)
+                    ValueSlider(control: Control(id: "lb.flow", label: "Flusso", min: 1, max: 100, def: 100, step: 1, decimals: 0, track: .plain),
+                                value: ed.refineFlow, onChange: { ed.refineFlow = $0 })
+                        .frame(height: ToolSlider.height)
+                }
+                if !s.refine.isEmpty {
+                    FlatButton(title: "Azzera rifinitura (\(s.refine.count))", icon: "arrow.counterclockwise") { ed.clearRefine() }
+                        .padding(.vertical, 4)
+                }
             }
             .disabled(!s.enabled)
             .opacity(s.enabled ? 1 : 0.45)
@@ -869,21 +904,153 @@ private struct LensBlurTool: View {
                 .padding(.vertical, 4)
         }
     }
+
+    /// A lens blur slider: the photo follows the finger, the setting is kept when it lifts.
+    private func blurSlider(_ id: String, _ label: String, _ lo: Double, _ hi: Double, _ def: Double, _ value: Double, _ set: @escaping (inout LensBlurState, Double) -> Void) -> some View {
+        ValueSlider(control: Control(id: id, label: label, min: lo, max: hi, def: def, step: 1, decimals: 0, track: .plain),
+                    value: value,
+                    onChange: { v in
+                        var n = ed.lensBlur
+                        set(&n, v)
+                        ed.setLensBlur(n, live: true)
+                    },
+                    onEnd: { ed.commitLensBlur() })
+            .frame(height: ToolSlider.height)
+    }
+}
+
+/// The shape of a lens's out-of-focus highlights, drawn small.
+private struct BokehIcon: View {
+    let shape: String
+
+    var body: some View {
+        GeometryReader { g in
+            let r = min(g.size.width, g.size.height) / 2
+            let c = CGPoint(x: g.size.width / 2, y: g.size.height / 2)
+            switch shape {
+            case "bubble":
+                ZStack {
+                    Circle().fill(Color.primary.opacity(0.25))
+                    Circle().stroke(lineWidth: 2.2)
+                }
+            case "ring":
+                Circle().stroke(lineWidth: r * 0.55).padding(r * 0.27)
+            case "blade5":
+                Path { p in
+                    for i in 0..<5 {
+                        let a = (Double(i) * 72 - 90) * .pi / 180
+                        let q = CGPoint(x: c.x + r * CGFloat(cos(a)), y: c.y + r * CGFloat(sin(a)))
+                        if i == 0 { p.move(to: q) } else { p.addLine(to: q) }
+                    }
+                    p.closeSubpath()
+                }
+                .fill()
+            case "cateye":
+                Path { p in
+                    p.addArc(center: CGPoint(x: c.x - r * 0.45, y: c.y), radius: r, startAngle: .degrees(-62), endAngle: .degrees(62), clockwise: false)
+                    p.addArc(center: CGPoint(x: c.x + r * 0.45, y: c.y), radius: r, startAngle: .degrees(118), endAngle: .degrees(242), clockwise: false)
+                    p.closeSubpath()
+                }
+                .fill()
+            default:
+                Circle().fill()
+            }
+        }
+    }
+}
+
+/// Lightroom's focal range: how much of the scene lies at each distance (near on the left), on the
+/// depth's colours; the band in focus is a box to drag, or to stretch from either side.
+private struct FocalRange: View {
+    @ObservedObject var ed: EditorModel
+    @State private var grab: (what: Int, lo: Double, hi: Double, x: CGFloat)?
+
+    var body: some View {
+        GeometryReader { g in
+            let s = ed.lensBlur
+            let w = g.size.width, h = g.size.height
+            let centre = 1 - (s.focus ?? ed.subjectDepth ?? 0.85)
+            let lo = max(0, centre - s.range / 2), hi = min(1, centre + s.range / 2)
+            ZStack(alignment: .topLeading) {
+                LinearGradient(colors: [Color(hex: 0xFFDB59), Color(hex: 0xD9526E), Color(hex: 0x5C29A0), Color(hex: 0x1A0D52)], startPoint: .leading, endPoint: .trailing)
+                    .opacity(0.55)
+                Path { p in
+                    let bins = ed.depthHistogram
+                    guard !bins.isEmpty else { return }
+                    let bw = w / CGFloat(bins.count)
+                    p.move(to: CGPoint(x: 0, y: h))
+                    for (i, v) in bins.enumerated() {
+                        let y = h - CGFloat(min(1, sqrt(v))) * (h - 6)
+                        p.addLine(to: CGPoint(x: CGFloat(i) * bw, y: y))
+                        p.addLine(to: CGPoint(x: CGFloat(i + 1) * bw, y: y))
+                    }
+                    p.addLine(to: CGPoint(x: w, y: h))
+                    p.closeSubpath()
+                }
+                .fill(Color.white.opacity(0.32))
+                Rectangle()
+                    .fill(Color.white.opacity(0.14))
+                    .overlay(Rectangle().stroke(Color.white, lineWidth: 1.5))
+                    .frame(width: max(4, CGFloat(hi - lo) * w), height: h)
+                    .offset(x: CGFloat(lo) * w)
+                Text("Vicino").font(Typo.micro).foregroundColor(Lc.text).padding(4)
+                Text("Lontano").font(Typo.micro).foregroundColor(Lc.text).padding(4).frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { v in
+                        if grab == nil {
+                            let x0 = CGFloat(lo) * w, x1 = CGFloat(hi) * w
+                            let what = abs(v.startLocation.x - x0) < 16 ? 0 : (abs(v.startLocation.x - x1) < 16 ? 1 : 2)
+                            grab = (what, lo, hi, v.startLocation.x)
+                            // a touch outside the box: the box moves there
+                            if what == 2 && (v.startLocation.x < x0 || v.startLocation.x > x1) {
+                                let half = (hi - lo) / 2, m = Double(v.startLocation.x / w)
+                                grab = (2, max(0, m - half), min(1, m + half), v.startLocation.x)
+                            }
+                        }
+                        guard let gr = grab else { return }
+                        let d = Double((v.location.x - gr.x) / w)
+                        var a = gr.lo, b = gr.hi
+                        switch gr.what {
+                        case 0: a = min(b - 0.02, max(0, gr.lo + d))
+                        case 1: b = max(a + 0.02, min(1, gr.hi + d))
+                        default:
+                            let span = gr.hi - gr.lo
+                            a = max(0, min(1 - span, gr.lo + d))
+                            b = a + span
+                        }
+                        var n = ed.lensBlur
+                        n.focus = 1 - (a + b) / 2
+                        n.range = b - a
+                        n.enabled = true
+                        ed.setLensBlur(n, live: true)
+                    }
+                    .onEnded { _ in
+                        grab = nil
+                        ed.commitLensBlur()
+                    }
+            )
+        }
+    }
 }
 
 // MARK: - Local adjustments
 
-/// Capture One's layers: masks (brush, gradients, ranges), each with its own sliders.
+/// Lightroom's Masking: masks made of components (each added to, subtracted from or intersected
+/// with the ones above it), one-tap selections worked out on the iPad, the overlay in the colour
+/// and strength wanted, and each mask's own adjustments with its Amount.
 private struct LayersTool: View {
     @ObservedObject var ed: EditorModel
-    @State private var feather = 50.0
-    @State private var lo = 60.0
-    @State private var hi = 100.0
     @State private var page = 0
+    @State private var renaming: Int?
+    @State private var newName = ""
     private let pages: [(String, [String])] = [
         ("Luce", ["exposure", "contrast", "highlights", "shadows", "whites", "blacks"]),
-        ("Colore", ["temp", "tint", "saturation"]),
-        ("Effetti", ["clarity", "texture", "dehaze"]),
+        ("Colore", ["temp", "tint", "hue", "saturation", "color_hue", "color_sat"]),
+        ("Effetti", ["texture", "clarity", "dehaze"]),
         ("Dettagli", ["sharpness", "noise", "moire", "defringe"]),
     ]
 
@@ -891,152 +1058,312 @@ private struct LayersTool: View {
         let selected = ed.masks.first { $0.id == ed.selectedMask }
         VStack(alignment: .leading, spacing: 6) {
             Menu {
-                Button { ed.addMask("brush") } label: { Label("Pennello", systemImage: "paintbrush.pointed") }
-                Button { ed.addMask("linear") } label: { Label("Gradiente lineare", systemImage: "square.split.diagonal") }
-                Button { ed.addMask("radial") } label: { Label("Gradiente radiale", systemImage: "circle.dashed") }
-                Button { ed.addMask("luminanceRange") } label: { Label("Gamma luminanza", systemImage: "sun.max") }
-                Button { ed.addMask("colorRange") } label: { Label("Gamma colore", systemImage: "eyedropper") }
+                KindMenu { ed.addMask($0) }
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "plus").font(.system(size: 13, weight: .semibold))
-                    Text("Nuovo livello").font(Typo.labelStrong)
+                    Text("Nuova maschera").font(Typo.labelStrong)
                 }
                 .foregroundColor(Lc.text)
-                .frame(maxWidth: .infinity, minHeight: 34)
+                .frame(maxWidth: .infinity, minHeight: 38)
                 .background(Lc.raised)
                 .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
             .padding(.top, 2)
             if ed.masks.isEmpty {
-                Text("Nessun livello. Un livello regola solo una parte della foto: dipinta, sfumata o scelta per luce o colore.")
+                Text("Una maschera regola solo una parte della foto: il soggetto, il cielo, ciò che dipingi, una sfumatura, una gamma di luce, colore o profondità.")
                     .font(Typo.caption).foregroundColor(Lc.text3).fixedSize(horizontal: false, vertical: true)
             }
             VStack(spacing: 1) {
                 ForEach(ed.masks.reversed()) { m in
-                    LayerRow(mask: m, selected: m.id == ed.selectedMask,
-                             onSelect: {
-                                 ed.selectedMask = m.id
-                                 switch m.kind {
-                                 case "brush": ed.cursorTool = .paint
-                                 case "linear", "radial": ed.cursorTool = .shape
-                                 default: if ed.cursorTool != .crop { ed.cursorTool = .none }
-                                 }
-                             },
-                             onVisible: { ed.setMaskVisible(m.id, !m.visible) },
-                             onInvert: { ed.invertMask(m.id) },
-                             onDelete: { ed.deleteMask(m.id) })
+                    maskRow(m, selected: m.id == ed.selectedMask)
+                    if m.id == ed.selectedMask {
+                        ForEach(m.parts, id: \.index) { part in
+                            partRow(m, part, selected: part.index == (m.part(ed.selectedPart)?.index ?? -1))
+                        }
+                        HStack(spacing: 6) {
+                            opMenu("Aggiungi", icon: "plus", op: "add")
+                            opMenu("Sottrai", icon: "minus", op: "subtract")
+                            opMenu("Interseca", icon: "circle.lefthalf.filled", op: "intersect")
+                        }
+                        .padding(.leading, 26)
+                        .padding(.vertical, 6)
+                        .padding(.trailing, 4)
+                        .background(Lc.pressed)
+                    }
                 }
             }
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             if let m = selected {
-                ToggleRow(label: "Mostra la maschera in rosso", on: ed.maskOverlay) { ed.maskOverlay = $0 }
-                shapeControls(m)
+                SubHeader(title: "Sovrapposizione")
+                ToggleRow(label: "Mostra sovrapposizione", on: ed.maskOverlay) { ed.maskOverlay = $0 }
+                HStack(spacing: 10) {
+                    ForEach(EditOverlay.overlayColors.indices, id: \.self) { i in
+                        let c = EditOverlay.overlayColors[i]
+                        Button { ed.overlayColor = i } label: {
+                            Circle().fill(Color(red: c.r, green: c.g, blue: c.b))
+                                .frame(width: 22, height: 22)
+                                .overlay(Circle().stroke(Color.white.opacity(i == ed.overlayColor ? 1 : 0.25), lineWidth: i == ed.overlayColor ? 2 : 0.5))
+                                .frame(maxWidth: .infinity, minHeight: 34)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                ValueSlider(control: Control(id: "overlay.opacity", label: "Opacità", min: 10, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
+                            value: ed.overlayOpacity, onChange: { ed.overlayOpacity = $0 })
+                    .frame(height: ToolSlider.height)
+                if let part = m.part(ed.selectedPart) {
+                    SubHeader(title: part.label)
+                    PartControls(ed: ed, mask: m, part: part)
+                }
+                SubHeader(title: "Bordi")
+                RefineCatcher(ed: ed, id: m.id)
+                    .frame(height: ToolSlider.height)
+                HStack(spacing: 6) {
+                    Text("REGOLAZIONI").overline().fixedSize()
+                    Rectangle().fill(Lc.hairline).frame(height: 0.5)
+                    MiniButton(title: "Azzera") { ed.resetLocal() }
+                }
+                .frame(height: 34)
+                .padding(.top, 6)
+                Sliders(store: ed.localStore, ids: ["local.amount"])
                 Segment(options: pages.map(\.0), selected: page) { page = $0 }
-                    .padding(.top, 8)
-                Sliders(store: ed.localStore, ids: pages[page].1.map { "local.\($0)" }, labels: ["local.highlights": "Luci"])
+                    .padding(.vertical, 4)
+                Sliders(store: ed.localStore, ids: pages[page].1.map { "local.\($0)" })
             }
         }
-        .onChange(of: ed.selectedMask) { _ in loadShape() }
-        .onAppear { loadShape() }
     }
 
-    private func loadShape() {
-        guard let m = ed.masks.first(where: { $0.id == ed.selectedMask }) else { return }
-        feather = m.shape["feather"].map { double($0) } ?? 50
-        lo = (m.shape["lo"].map { double($0) } ?? 0.6) * 100
-        hi = (m.shape["hi"].map { double($0) } ?? 1) * 100
-    }
-
-    @ViewBuilder
-    private func shapeControls(_ m: MaskInfo) -> some View {
-        switch m.kind {
-        case "brush":
-            FlatButton(title: ed.cursorTool == .paint ? "Pennello attivo" : "Dipingi sulla foto", icon: "paintbrush.pointed", prominent: ed.cursorTool == .paint) {
-                ed.cursorTool = ed.cursorTool == .paint ? .none : .paint
-            }
-            .padding(.top, 4)
-            if ed.cursorTool == .paint {
-                Segment(options: ["Dipingi", "Cancella"], selected: ed.erasing ? 1 : 0) { ed.erasing = $0 == 1 }
-                    .padding(.top, 6)
-                ValueSlider(control: Control(id: "brush.size", label: "Dimensione", min: 0.5, max: 25, def: 3, step: 0.1, decimals: 1, track: .plain),
-                            value: ed.brushSize * 100, onChange: { ed.brushSize = $0 / 100 })
-                    .frame(height: ToolSlider.height)
-                ValueSlider(control: Control(id: "brush.feather", label: "Sfumatura", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
-                            value: ed.brushFeather, onChange: { ed.brushFeather = $0 })
-                    .frame(height: ToolSlider.height)
-                ValueSlider(control: Control(id: "brush.flow", label: "Flusso", min: 1, max: 100, def: 100, step: 1, decimals: 0, track: .plain),
-                            value: ed.brushFlow, onChange: { ed.brushFlow = $0 })
-                    .frame(height: ToolSlider.height)
-            }
-        case "linear", "radial":
-            if m.kind == "radial" {
-                ValueSlider(control: Control(id: "radial.feather", label: "Sfumatura", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
-                            value: feather, onChange: { feather = $0 },
-                            onEnd: {
-                                var s = m.shape
-                                s["feather"] = feather
-                                ed.updateShape(m.id, s)
-                            })
-                    .frame(height: ToolSlider.height)
-            }
-            FlatButton(title: ed.cursorTool == .shape ? "Maniglie attive" : "Modifica sulla foto", icon: "hand.draw", prominent: ed.cursorTool == .shape) {
-                ed.cursorTool = ed.cursorTool == .shape ? .none : .shape
-            }
-            .padding(.top, 4)
-        case "luminanceRange":
-            ValueSlider(control: Control(id: "lum.lo", label: "Da", min: 0, max: 100, def: 60, step: 1, decimals: 0, track: .gradient([UIColor(hex: 0x111111), UIColor(hex: 0xEEEEEE)])),
-                        value: lo, onChange: { lo = $0 }, onEnd: { ed.setLuminanceRange(m.id, lo: lo / 100, hi: hi / 100) })
-                .frame(height: ToolSlider.height)
-            ValueSlider(control: Control(id: "lum.hi", label: "A", min: 0, max: 100, def: 100, step: 1, decimals: 0, track: .gradient([UIColor(hex: 0x111111), UIColor(hex: 0xEEEEEE)])),
-                        value: hi, onChange: { hi = $0 }, onEnd: { ed.setLuminanceRange(m.id, lo: lo / 100, hi: hi / 100) })
-                .frame(height: ToolSlider.height)
-        case "colorRange":
-            FlatButton(title: ed.cursorTool == .sample ? "Tocca la foto" : "Campiona un colore", icon: "eyedropper", prominent: ed.cursorTool == .sample) {
-                ed.cursorTool = ed.cursorTool == .sample ? .none : .sample
-            }
-            .padding(.top, 4)
-        default:
-            EmptyView()
-        }
-    }
-}
-
-private struct LayerRow: View {
-    let mask: MaskInfo
-    let selected: Bool
-    let onSelect: () -> Void
-    let onVisible: () -> Void
-    let onInvert: () -> Void
-    let onDelete: () -> Void
-
-    var body: some View {
+    private func maskRow(_ m: MaskInfo, selected: Bool) -> some View {
         HStack(spacing: 8) {
-            Button(action: onVisible) {
-                Image(systemName: mask.visible ? "eye" : "eye.slash")
+            Button { ed.setMaskVisible(m.id, !m.visible) } label: {
+                Image(systemName: m.visible ? "eye" : "eye.slash")
                     .font(.system(size: 13))
-                    .foregroundColor(mask.visible ? Lc.text2 : Lc.text3)
-                    .frame(width: 30, height: 34)
+                    .foregroundColor(m.visible ? Lc.text2 : Lc.text3)
+                    .frame(width: 30, height: 40)
             }
             .buttonStyle(.plain)
-            Image(systemName: mask.icon).font(.system(size: 13)).foregroundColor(selected ? Lc.accent : Lc.text2)
-            Text(mask.name.isEmpty ? mask.label : mask.name).font(Typo.label).foregroundColor(selected ? Lc.text : Lc.text2).lineLimit(1)
+            Image(systemName: m.icon).font(.system(size: 13)).foregroundColor(selected ? Lc.accent : Lc.text2)
+            if renaming == m.id {
+                TextField("Nome", text: $newName, onCommit: {
+                    ed.renameMask(m.id, newName)
+                    renaming = nil
+                })
+                .font(Typo.label).foregroundColor(Lc.text)
+            } else {
+                Text(m.name.isEmpty ? m.label : m.name).font(Typo.label).foregroundColor(selected ? Lc.text : Lc.text2).lineLimit(1)
+            }
             Spacer(minLength: 4)
-            Button(action: onInvert) {
-                Image(systemName: "circle.lefthalf.filled")
-                    .font(.system(size: 13))
-                    .foregroundColor(mask.invert ? Lc.accent : Lc.text3)
-                    .frame(width: 30, height: 34)
+            if m.invert {
+                Image(systemName: "circle.lefthalf.filled").font(.system(size: 11)).foregroundColor(Lc.accent)
             }
-            .buttonStyle(.plain)
-            Button(action: onDelete) {
-                Image(systemName: "trash").font(.system(size: 12)).foregroundColor(Lc.text3).frame(width: 30, height: 34)
+            Menu {
+                Button { newName = m.name; renaming = m.id } label: { Label("Rinomina", systemImage: "pencil") }
+                Button { ed.duplicateMask(m.id, invert: false) } label: { Label("Duplica", systemImage: "plus.square.on.square") }
+                Button { ed.duplicateMask(m.id, invert: true) } label: { Label("Duplica e inverti", systemImage: "circle.lefthalf.filled") }
+                Button { ed.invertMask(m.id) } label: { Label(m.invert ? "Non invertire" : "Inverti", systemImage: "arrow.left.arrow.right") }
+                Button(role: .destructive) { ed.deleteMask(m.id) } label: { Label("Elimina", systemImage: "trash") }
+            } label: {
+                Image(systemName: "ellipsis").font(.system(size: 13, weight: .semibold)).foregroundColor(Lc.text2)
+                    .frame(width: 34, height: 40).contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
         }
         .padding(.leading, 2)
         .background(selected ? Lc.pressed : Lc.field)
         .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
+        .onTapGesture {
+            ed.selectedMask = m.id
+            ed.cursorTool = EditorModel.tool(for: m.part(nil)?.kind ?? "")
+        }
+    }
+
+    private func partRow(_ m: MaskInfo, _ part: MaskPart, selected: Bool) -> some View {
+        HStack(spacing: 8) {
+            Text(part.index == 0 ? "" : (part.op == "subtract" ? "−" : (part.op == "intersect" ? "∩" : "+")))
+                .font(.system(size: 12, weight: .bold)).foregroundColor(part.op == "subtract" ? Lc.danger : Lc.text2)
+                .frame(width: 18)
+            Image(systemName: part.icon).font(.system(size: 12)).foregroundColor(selected ? Lc.accent : Lc.text3)
+            Text(part.label).font(Typo.caption).foregroundColor(selected ? Lc.text : Lc.text2).lineLimit(1)
+            Spacer(minLength: 4)
+            if part.invert {
+                Image(systemName: "circle.lefthalf.filled").font(.system(size: 10)).foregroundColor(Lc.accent)
+            }
+            Menu {
+                if part.index > 0 {
+                    Button { ed.partAction(part.index, "op", op: "add") } label: { Label("Aggiungi", systemImage: "plus") }
+                    Button { ed.partAction(part.index, "op", op: "subtract") } label: { Label("Sottrai", systemImage: "minus") }
+                    Button { ed.partAction(part.index, "op", op: "intersect") } label: { Label("Interseca", systemImage: "circle.lefthalf.filled") }
+                }
+                Button { ed.partAction(part.index, "invert") } label: { Label(part.invert ? "Non invertire" : "Inverti", systemImage: "arrow.left.arrow.right") }
+                Button { ed.partAction(part.index, "duplicate") } label: { Label("Duplica", systemImage: "plus.square.on.square") }
+                Button(role: .destructive) { ed.partAction(part.index, "delete") } label: { Label("Elimina", systemImage: "trash") }
+            } label: {
+                Image(systemName: "ellipsis").font(.system(size: 12, weight: .semibold)).foregroundColor(Lc.text3)
+                    .frame(width: 34, height: 34).contentShape(Rectangle())
+            }
+        }
+        .padding(.leading, 26)
+        .background(selected ? Lc.raised : Lc.pressed)
+        .contentShape(Rectangle())
+        .onTapGesture {
+            ed.selectedPart = part.index
+            ed.cursorTool = EditorModel.tool(for: part.kind)
+        }
+    }
+
+    private func opMenu(_ title: String, icon: String, op: String) -> some View {
+        Menu {
+            KindMenu { ed.addPart($0, op: op) }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 11, weight: .semibold))
+                Text(title).font(Typo.caption)
+            }
+            .foregroundColor(Lc.text)
+            .frame(maxWidth: .infinity, minHeight: 30)
+            .background(Lc.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+    }
+}
+
+/// What a mask (or a component) can select: the one-tap selections first, then the tools.
+private struct KindMenu: View {
+    let pick: (String) -> Void
+
+    var body: some View {
+        Section("Selezioni rapide") {
+            ForEach(["subject", "sky", "background", "people"], id: \.self) { k in
+                Button { pick(k) } label: { Label(MaskKinds.label(k), systemImage: MaskKinds.icon(k)) }
+            }
+        }
+        Section("Strumenti") {
+            ForEach(["brush", "linear", "radial", "colorRange", "luminanceRange", "depthRange"], id: \.self) { k in
+                Button { pick(k) } label: { Label(MaskKinds.label(k), systemImage: MaskKinds.icon(k)) }
+            }
+        }
+    }
+}
+
+/// Refine Edges: its value goes to the engine once the finger lifts (each value is a new
+/// guided-filter pass).
+private struct RefineCatcher: View {
+    @ObservedObject var ed: EditorModel
+    let id: Int
+    @State private var value: Double?
+
+    var body: some View {
+        ValueSlider(control: Control(id: "mask.refine", label: "Rifinisci bordi", min: 0, max: 100, def: 0, step: 1, decimals: 0, track: .plain),
+                    value: value ?? (ed.masks.first { $0.id == id }?.refine ?? 0),
+                    onChange: { value = $0 },
+                    onEnd: {
+                        if let v = value { ed.setRefine(id, v) }
+                        value = nil
+                    })
+    }
+}
+
+/// The settings of the component being edited, by what it is.
+private struct PartControls: View {
+    @ObservedObject var ed: EditorModel
+    let mask: MaskInfo
+    let part: MaskPart
+    @State private var live: [String: Double] = [:]
+
+    private func v(_ key: String, _ def: Double) -> Double {
+        live[key] ?? (part.shape[key].map { double($0) } ?? def)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            switch part.shownKind {
+            case "brush":
+                FlatButton(title: ed.cursorTool == .paint ? "Pennello attivo" : "Dipingi sulla foto", icon: "paintbrush.pointed", prominent: ed.cursorTool == .paint) {
+                    ed.cursorTool = ed.cursorTool == .paint ? .none : .paint
+                }
+                .padding(.vertical, 4)
+                Segment(options: ["Dipingi", "Cancella"], selected: ed.erasing ? 1 : 0) { ed.erasing = $0 == 1 }
+                    .padding(.vertical, 4)
+                slider("brush.size", "Dimensione", 0.5, 25, 3, ed.brushSize * 100, decimals: 1) { ed.brushSize = $0 / 100 }
+                slider("brush.feather", "Sfumatura", 0, 100, 50, ed.brushFeather) { ed.brushFeather = $0 }
+                slider("brush.flow", "Flusso", 1, 100, 100, ed.brushFlow) { ed.brushFlow = $0 }
+                slider("brush.density", "Densità", 1, 100, 100, ed.brushDensity) { ed.brushDensity = $0 }
+                ToggleRow(label: "Maschera automatica", on: ed.autoMask) { ed.autoMask = $0 }
+            case "linear":
+                handlesButton
+            case "radial":
+                shapeSlider("feather", "Sfumatura", 0, 100, 50)
+                handlesButton
+            case "luminanceRange":
+                shapeSlider("lo", "Da", 0, 100, 60, scale: 100, track: .gradient([UIColor(hex: 0x111111), UIColor(hex: 0xEEEEEE)]))
+                shapeSlider("hi", "A", 0, 100, 100, scale: 100, track: .gradient([UIColor(hex: 0x111111), UIColor(hex: 0xEEEEEE)]))
+                shapeSlider("lo_feather", "Sfumatura scuri", 0, 50, 10, scale: 100)
+                shapeSlider("hi_feather", "Sfumatura chiari", 0, 50, 10, scale: 100)
+            case "colorRange":
+                FlatButton(title: ed.cursorTool == .sample ? "Tocca la foto" : "Campiona un colore", icon: "eyedropper", prominent: ed.cursorTool == .sample) {
+                    ed.cursorTool = ed.cursorTool == .sample ? .none : .sample
+                }
+                .padding(.vertical, 4)
+                ToggleRow(label: "Aggiungi campioni (fino a 5)", on: ed.sampleAdd) { ed.sampleAdd = $0 }
+                shapeSlider("refine", "Rifinisci", 0, 100, 50)
+            case "depthRange":
+                let d = Selections.depthSettings(part.name)
+                depthSlider("near", "Da (vicino)", d.near * 100, d)
+                depthSlider("far", "A (lontano)", d.far * 100, d)
+                depthSlider("feather", "Sfumatura", d.feather * 100, d)
+                    .onAppear { Task { _ = await ed.analysis() } }
+            case "object", "subject", "sky", "background", "people":
+                shapeSlider("edge", "Bordo", -100, 100, 0, track: .centered)
+                Text("Negativo: bordo più netto · positivo: più morbido").font(Typo.caption).foregroundColor(Lc.text3).padding(.bottom, 4)
+            default:
+                EmptyView()
+            }
+        }
+    }
+
+    private var handlesButton: some View {
+        FlatButton(title: ed.cursorTool == .shape ? "Maniglie attive" : "Modifica sulla foto", icon: "hand.draw", prominent: ed.cursorTool == .shape) {
+            ed.cursorTool = ed.cursorTool == .shape ? .none : .shape
+        }
+        .padding(.vertical, 4)
+    }
+
+    private func slider(_ id: String, _ label: String, _ lo: Double, _ hi: Double, _ def: Double, _ value: Double, decimals: Int = 0, _ set: @escaping (Double) -> Void) -> some View {
+        ValueSlider(control: Control(id: id, label: label, min: lo, max: hi, def: def, step: decimals > 0 ? 0.1 : 1, decimals: decimals, track: .plain),
+                    value: value, onChange: set)
+            .frame(height: ToolSlider.height)
+    }
+
+    /// A setting of the component's shape (`scale`: the slider's units per shape unit), sent when
+    /// the finger lifts.
+    private func shapeSlider(_ key: String, _ label: String, _ lo: Double, _ hi: Double, _ def: Double, scale: Double = 1, track: Track = .plain) -> some View {
+        ValueSlider(control: Control(id: "part.\(key)", label: label, min: lo, max: hi, def: def, step: 1, decimals: 0, track: track),
+                    value: v(key, def / scale) * scale,
+                    onChange: { live[key] = $0 / scale },
+                    onEnd: {
+                        if let x = live[key] { ed.setPartValue(mask.id, key, x) }
+                        live[key] = nil
+                    })
+            .frame(height: ToolSlider.height)
+    }
+
+    /// The depth band follows the finger (one undo step).
+    private func depthSlider(_ key: String, _ label: String, _ value: Double, _ d: (near: Double, far: Double, feather: Double)) -> some View {
+        ValueSlider(control: Control(id: "depth.\(key)", label: label, min: 0, max: 100, def: value, step: 1, decimals: 0,
+                                     track: key == "feather" ? .plain : .gradient([UIColor(hex: 0xF2D14A), UIColor(hex: 0x8B5CE6), UIColor(hex: 0x1F2B5E)])),
+                    value: live[key] ?? value,
+                    onChange: { x in
+                        if live.isEmpty { ed.begin("Gamma profondità") }
+                        live[key] = x
+                        let near = (live["near"] ?? d.near * 100) / 100, far = (live["far"] ?? d.far * 100) / 100, f = (live["feather"] ?? d.feather * 100) / 100
+                        ed.setDepthRange(near: near, far: far, feather: f)
+                    },
+                    onEnd: {
+                        if !live.isEmpty { ed.end() }
+                        live = [:]
+                    })
+            .frame(height: ToolSlider.height)
     }
 }
 
@@ -1060,6 +1387,16 @@ private struct SpotTool: View {
             HStack(spacing: 6) {
                 FlatButton(title: "Trova polvere", icon: "sparkle.magnifyingglass", enabled: ed.working == nil) { ed.run("spot.findDust") }
                 FlatButton(title: "Togli l'ultima", icon: "arrow.uturn.backward", enabled: !ed.spots.isEmpty) { ed.deleteSpot(ed.spots.count - 1) }
+            }
+            // Lightroom's Visualize Spots: the photo as its detail, the dust standing out
+            ToggleRow(label: "Visualizza macchie", on: ed.visualizeSpots) { on in
+                ed.visualizeSpots = on
+                if on && ed.cursorTool != .spot { ed.cursorTool = .spot }
+            }
+            if ed.visualizeSpots {
+                ValueSlider(control: Control(id: "spot.contrast", label: "Contrasto", min: 0, max: 100, def: 50, step: 1, decimals: 0, track: .plain),
+                            value: ed.spotContrast, onChange: { ed.spotContrast = $0 }, onEnd: { ed.refreshSpotMap() })
+                    .frame(height: ToolSlider.height)
             }
             Text(ed.spots.isEmpty ? "Nessuna macchia" : (ed.spots.count == 1 ? "1 macchia corretta" : "\(ed.spots.count) macchie corrette"))
                 .font(Typo.caption).foregroundColor(Lc.text3)

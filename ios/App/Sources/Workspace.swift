@@ -115,7 +115,7 @@ private struct WorkspaceBar: View {
                 if ed.cursorTool == .crop { ed.exitCrop() }
                 if ed.cursorTool == .paint {
                     ed.cursorTool = .none
-                } else if let m = ed.masks.first(where: { $0.id == ed.selectedMask }), m.kind == "brush" {
+                } else if let m = ed.masks.first(where: { $0.id == ed.selectedMask }), m.part(ed.selectedPart)?.kind == "brush" {
                     ed.cursorTool = .paint
                 } else {
                     ed.addMask("brush")
@@ -239,7 +239,7 @@ private struct ViewerArea: View {
                     // the viewer stays (with its picture) under the crop tool, which takes its
                     // place once the uncropped photo is ready
                     let cropping = ed.cursorTool == .crop && ed.uncropped != nil
-                    ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before ?? (ed.showDepth ? ed.depthImage : nil),
+                    ViewerHost(model: model, key: model.current, onZoom: { z in zoomed = z > 1.4 }, before: before ?? (ed.showDepth ? ed.depthImage : nil) ?? (ed.visualizeSpots ? ed.spotMap : nil),
                                hidden: model.hero != nil || cropping)
                     if cropping {
                         CropHost(ed: ed)
@@ -273,7 +273,7 @@ private struct ViewerArea: View {
                         .background(Lc.raised.opacity(0.95))
                         .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
                         .padding(.bottom, 12)
-                    } else if ed.cursorTool == .spot || ed.cursorTool == .paint || ed.cursorTool == .shape || ed.cursorTool == .sample || ed.cursorTool == .focus {
+                    } else if [.spot, .paint, .shape, .sample, .focus, .refine].contains(ed.cursorTool) {
                         Text(toolHint(ed.cursorTool))
                             .font(Typo.labelStrong).foregroundColor(Lc.text)
                             .padding(.horizontal, 12).frame(height: 30)
@@ -327,7 +327,8 @@ private func toolHint(_ t: CursorTool) -> String {
     case .paint: return "Dipingi la maschera · due dita per zoomare"
     case .shape: return "Trascina le maniglie del gradiente"
     case .sample: return "Tocca il colore da selezionare"
-    case .focus: return "Tocca ciò che deve restare a fuoco"
+    case .focus: return "Tocca ciò che va a fuoco, o traccia un riquadro"
+    case .refine: return "Dipingi ciò che va a fuoco o sfocato · due dita per zoomare"
     default: return ""
     }
 }

@@ -141,6 +141,7 @@ final class AppModel: ObservableObject {
             self?.editor.pictureShown(p)
         }
         editor.onEdited = { [weak self] key in self?.library.edited(key) }
+        editor.onNotice = { [weak self] text in self?.say(text) }
         loupe.intercept = { [weak self] p in self?.editor.intercept(p) ?? false }
         editor.presetsChanged = { [weak self] in await self?.presetsChanged() }
         editor.onIdle = { [weak self] in
@@ -832,7 +833,11 @@ final class AppModel: ObservableObject {
         guard let d = try? await engine.object("develop.get", ["id": photo]) else { return }
         let s = LensBlurState.from(d)
         guard s.enabled, let small = try? await engine.render(photo, 1024, 1024).image, let depth = await DepthEstimator.shared.estimate(small) else { return }
-        _ = await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(toFile: url, depth: depth, s, quality: quality) }.value
+        // the Refine strokes are in the image's own coordinates: the crop takes them to the picture's
+        let aspect = (try? await engine.renderUncropped(photo, 128, 128, draft: true)).map { CGFloat($0.image.width) / CGFloat(max(1, $0.image.height)) } ?? 1.5
+        let crop = CropState.from(d, aspect: aspect)
+        let map = LensBlurRenderer.blurMap(depth, s, crop: crop, aspect: CGFloat(small.width) / CGFloat(max(1, small.height)))
+        _ = await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(toFile: url, map: map, s, quality: quality) }.value
     }
 
     /// A file into the Photos library (off the main actor: Photos runs the change block on its own
