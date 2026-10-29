@@ -83,7 +83,7 @@ for tool in ["color", "details", "adjustments", "metadata", "capture"]:
 launch()
 time.sleep(8)
 shot("04_browser_at_start")
-for t, tool in [("crop", "composition"), ("radial", "local"), ("spots", "details"), ("lensblur", "lens"), ("paint", "local"), ("cropdone", "composition"), ("connectback", "exposure"), ("home", "exposure")]:
+for t, tool in [("crop", "composition"), ("radial", "local"), ("spots", "details"), ("lensblur", "lens"), ("paint", "local"), ("cropdone", "composition"), ("connectback", "exposure"), ("home", "exposure"), ("masks", "local"), ("lensrefine", "lens")]:
     launch("-screen", "workspace", "-tool", tool, "-testTool", t)
     time.sleep(16)
     shot(f"07_{t}")

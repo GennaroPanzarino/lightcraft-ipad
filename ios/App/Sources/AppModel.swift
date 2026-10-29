@@ -250,6 +250,24 @@ final class AppModel: ObservableObject {
         editor.commitLensBlur()
         await wait(2)
         log("lens blur ok (\(editor.depthSource))")
+        // Lightroom's bokeh, its glow, a box of focus, a Refine stroke each way
+        for shape in ["bubble", "blade5", "ring", "cateye"] {
+            var l = editor.lensBlur
+            l.bokeh = shape
+            l.boost = 60
+            editor.setLensBlur(l, live: false)
+            editor.commitLensBlur()
+            await wait(0.8)
+        }
+        editor.focus(box: CGRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2))
+        await wait(0.8)
+        editor.refineFocus = true
+        editor.refineStroke((0..<30).map { CGPoint(x: 0.3 + Double($0) * 0.01, y: 0.3) })
+        await wait(0.8)
+        editor.refineFocus = false
+        editor.refineStroke((0..<30).map { CGPoint(x: 0.3 + Double($0) * 0.01, y: 0.7) })
+        await wait(1.5)
+        log("bokeh and refine ok (\(editor.lensBlur.refine.count) strokes)")
         // far past 100 %: developed at the photo's own size, enlarged on screen
         var deep = false
         renderDetail(window: CGRect(x: 0.4, y: 0.4, width: 0.05, height: 0.05), full: CGSize(width: 48000, height: 32000)) { img, _ in
@@ -305,6 +323,42 @@ final class AppModel: ObservableObject {
         await wait(1)
         editor.addMask("luminanceRange")
         await wait(1)
+        // a brush stroke painted live (pieces while the finger moves, one undo step)
+        editor.addMask("brush")
+        await wait(1)
+        let before = editor.history.count
+        editor.strokeBegan()
+        for k in 0..<6 {
+            editor.strokePart((0..<12).map { CGPoint(x: 0.2 + Double(k * 12 + $0) * 0.004, y: 0.6) }, pressure: [Float](repeating: 1, count: 12))
+            await wait(0.07)
+        }
+        editor.stroke([CGPoint(x: 0.5, y: 0.62)], pressure: [1])
+        await wait(1.5)
+        log("live brush ok (\(editor.history.count - before) step)")
+        // a component subtracted, a one-tap subject, a band of depth
+        editor.addPart("radial", op: "subtract")
+        await wait(1.5)
+        log("parts ok (\(editor.masks.first { $0.id == editor.selectedMask }?.parts.count ?? 0))")
+        editor.addMask("subject")
+        for _ in 0..<80 {
+            if editor.masks.contains(where: { $0.kind == "subject" }) { break }
+            await wait(0.1)
+        }
+        log("subject \(editor.masks.contains { $0.kind == "subject" } ? "ok" : "none")")
+        editor.addMask("depthRange")
+        await wait(3)
+        if editor.masks.contains(where: { $0.kind == "depthRange" }) {
+            editor.begin("Gamma profondità")
+            for i in 0..<10 {
+                editor.setDepthRange(near: 0, far: 0.2 + Double(i) * 0.03, feather: 0.1)
+                await wait(0.05)
+            }
+            editor.end()
+            await wait(1)
+            log("depth range ok")
+        } else {
+            log("depth range none")
+        }
         for m in editor.masks { editor.deleteMask(m.id) }
         await wait(1.5)
         log("layers ok")
@@ -316,6 +370,10 @@ final class AppModel: ObservableObject {
         editor.run("spot.findDust")
         await wait(6)
         log("dust ok (\(editor.spots.count) spots)")
+        editor.visualizeSpots = true
+        await wait(1.5)
+        log("visualize spots \(editor.spotMap != nil ? "ok" : "none")")
+        editor.visualizeSpots = false
         for p in presets.prefix(6) {
             editor.applyPreset(p.id, amount: 100)
             await wait(0.7)
@@ -325,6 +383,13 @@ final class AppModel: ObservableObject {
             editor.undo()
             await wait(0.3)
         }
+        // all the way back: the photo as it came in
+        for _ in 0..<200 where editor.canUndo {
+            editor.undo()
+            await wait(0.05)
+        }
+        await wait(1)
+        log("undo to the start ok (\(editor.cursor) of \(editor.history.count), first step \(editor.history.first ?? "?"))")
         for _ in 0..<3 {
             editor.redo()
             await wait(0.3)
@@ -378,6 +443,24 @@ final class AppModel: ObservableObject {
             editor.stroke((0..<60).map { CGPoint(x: 0.25 + Double($0) * 0.008, y: 0.45 + 0.1 * sin(Double($0) / 9)) }, pressure: [Float](repeating: 1, count: 60))
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             NSLog("lightcraft editor: mask overlay \(editor.maskImage != nil ? "shown" : "missing")")
+        case "masks":
+            // the Masking panel with a subject and a subtracted brush
+            editor.addMask("subject")
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            editor.addPart("brush", op: "subtract")
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            NSLog("lightcraft editor: masks \(editor.masks.map { "\($0.kind)/\($0.parts.count)" })")
+        case "lensrefine":
+            var l = editor.lensBlur
+            l.enabled = true
+            l.amount = 80
+            l.bokeh = "blade5"
+            l.boost = 70
+            editor.setLensBlur(l, live: false)
+            editor.commitLensBlur()
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            editor.cursorTool = .refine
+            editor.showDepth = true
         case "cropdone":
             // in and out of the crop tool: the photo must be back on screen
             editor.enterCrop()

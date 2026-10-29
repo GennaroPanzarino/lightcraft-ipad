@@ -6,7 +6,9 @@ import UIKit
 /// only what is on screen is developed again, sharp, at the screen's resolution (Lightroom's way:
 /// never the whole 33 MP photo). Not zoomed, the photo follows a horizontal drag and the next or
 /// previous shot slides in with it, as in a gallery. Pictures arrive straight from the engine.
-final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelegate {
+final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelegate, UIPencilInteractionDelegate {
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) { onPencilTap?() }
+
     /// A single tap (once it is clear no second one follows): where, 0…1 of the picture.
     var onTap: ((CGPoint?) -> Void)?
     /// A tap that cannot start a double tap (the white-balance picker): handled at once.
@@ -88,7 +90,14 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         paging = UIPanGestureRecognizer(target: self, action: #selector(paged(_:)))
         paging.delegate = self
         addGestureRecognizer(paging)
+        // the Apple Pencil's double tap: paint ↔ erase (Lightroom's), focus ↔ blur for Refine
+        let pencil = UIPencilInteraction()
+        pencil.delegate = self
+        addInteraction(pencil)
     }
+
+    /// The Pencil was double tapped.
+    var onPencilTap: (() -> Void)?
 
     required init?(coder: NSCoder) { fatalError() }
 
@@ -471,6 +480,14 @@ struct ViewerHost: UIViewRepresentable {
         v.onPage = { by in model.step(by) }
         v.neighbor = { by in model.neighborPicture(by) }
         v.tapsAtOnce = { model.editor.picking }
+        v.onPencilTap = {
+            switch ed.cursorTool {
+            case .paint: ed.erasing.toggle()
+            case .refine: ed.refineFocus.toggle()
+            default: break
+            }
+            Haptics.tick()
+        }
         v.onTap = { p in
             if model.editor.picking, let p = p {
                 model.editor.pickWhite(p)

@@ -40,9 +40,45 @@ struct Workspace: View {
             }
         }
         .background(Lc.window.ignoresSafeArea())
+        .background(KeyCommands(ed: ed, export: $exportOpen))
         .sheet(isPresented: Binding(get: { exportOpen || (model.export != nil && model.screen == .workspace) }, set: { if !$0 { exportOpen = false; if model.export?.finished != false { model.export = nil } } })) {
             ExportSheet(keys: model.current.map { [$0] } ?? []) { exportOpen = false }.environmentObject(model)
         }
+    }
+}
+
+/// A keyboard's shortcuts (Lightroom's): ⌘Z / ⇧⌘Z undo and redo, the arrows go through the shots,
+/// 0–5 rate, P picks, X rejects, U unflags, ⌘E exports, Esc leaves the cursor tool.
+private struct KeyCommands: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var ed: EditorModel
+    @Binding var export: Bool
+
+    var body: some View {
+        ZStack {
+            key("z", .command) { ed.undo() }
+            key("z", [.command, .shift]) { ed.redo() }
+            key(.leftArrow, []) { model.step(-1) }
+            key(.rightArrow, []) { model.step(1) }
+            key("e", .command) { export = true }
+            key(.escape, []) {
+                if ed.cursorTool == .crop { ed.exitCrop() } else { ed.cursorTool = .none }
+                ed.picking = false
+            }
+            ForEach(0..<6) { n in
+                key(KeyEquivalent(Character("\(n)")), []) { if let k = model.current { model.rate([k], n) } }
+            }
+            key("p", []) { if let k = model.current { model.flag([k], "pick") } }
+            key("x", []) { if let k = model.current { model.flag([k], "reject") } }
+            key("u", []) { if let k = model.current { model.flag([k], "none") } }
+        }
+        .frame(width: 0, height: 0)
+        .opacity(0)
+        .allowsHitTesting(false)
+    }
+
+    private func key(_ k: KeyEquivalent, _ m: EventModifiers, _ action: @escaping () -> Void) -> some View {
+        Button("", action: action).keyboardShortcut(k, modifiers: m)
     }
 }
 
