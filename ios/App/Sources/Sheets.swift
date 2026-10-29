@@ -39,7 +39,7 @@ struct SettingsSheet: View {
                     section("AREA DI LAVORO") {
                         ToggleRow(label: "Mostra subito il nuovo scatto", on: model.settings.followNewest) { model.settings.followNewest = $0 }
                         divider
-                        ToggleRow(label: "Strumenti a sinistra", on: model.settings.toolsLeft) { model.settings.toolsLeft = $0 }
+                        ToggleRow(label: "Strumenti a sinistra", on: model.settings.toolsOnLeft) { model.settings.toolsOnLeft = $0 }
                         divider
                         ToggleRow(label: "Schermo sempre acceso durante il collegamento", on: model.settings.keepAwake) { model.settings.keepAwake = $0 }
                     }

@@ -33,9 +33,11 @@ struct RootView: View {
                     // the workspace and the library both stay made (switching between them is
                     // instant, and each keeps its place): the one not shown is invisible
                     Workspace(ed: model.editor)
+                        .environment(\.screenShown, workspaceOpacity > 0)
                         .opacity(workspaceOpacity)
                         .allowsHitTesting(model.screen == .workspace && model.hero == nil)
                     BrowserView(library: model.library)
+                        .environment(\.screenShown, browserOpacity > 0)
                         .opacity(browserOpacity)
                         .allowsHitTesting(model.screen == .browser && model.hero == nil)
                 }

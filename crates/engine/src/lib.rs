@@ -987,12 +987,18 @@ impl Session {
 
     /// The op that sets a photo's develop settings and appends a History entry (for batches).
     pub fn develop_op(&self, id: PhotoId, settings: DevelopSettings, label: &str) -> Option<Op> {
-        self.catalog.photo(id)?;
+        let ph = self.catalog.photo(id)?;
         let settings = Arc::new(settings);
         let step = lightcraft_catalog::HistoryStep { label: label.into(), settings: settings.clone() };
-        Some(Op::Batch {
-            ops: vec![Op::SetDevelop { id, settings, label: label.into(), edited: Some((self.clock)()) }, Op::PushHistory { id, step }],
-        })
+        let mut ops = Vec::with_capacity(3);
+        // the photo as it came in is the first History step (Lightroom's "Import"): without it the
+        // first edit could never be undone
+        if ph.history.is_empty() {
+            ops.push(Op::PushHistory { id, step: lightcraft_catalog::HistoryStep { label: "Import".into(), settings: ph.develop.clone() } });
+        }
+        ops.push(Op::SetDevelop { id, settings, label: label.into(), edited: Some((self.clock)()) });
+        ops.push(Op::PushHistory { id, step });
+        Some(Op::Batch { ops })
     }
 
     pub fn begin_interaction(&mut self, label: &str) -> Result<()> {

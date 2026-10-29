@@ -46,6 +46,10 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     private var zoomStart: CFTimeInterval = 0
     private var zoomFrom = (scale: CGFloat(1), center: CGPoint.zero)
     private var zoomTo = (scale: CGFloat(1), center: CGPoint.zero)
+    /// A swipe's landing still on its way (the neighbour becoming the photo): a new swipe lands it
+    /// at once, so every swipe moves from the photo really shown.
+    private var pageLanding: (() -> Void)?
+    private var pageToken = 0
 
     /// How long a first tap waits for a second one (a double tap) before it counts as a tap.
     static let doubleTapWindow: CFTimeInterval = 0.26
@@ -341,7 +345,11 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         let drawing = [.spot, .paint, .shape, .sample, .focus].contains(tool)
         scroll.panGestureRecognizer.minimumNumberOfTouches = drawing ? 2 : 1
         paging.isEnabled = !drawing
-        // taps on the photo are the tool's: no double-tap zoom under them
+        // taps on the photo are the tool's (a spot, a colour, the focus): the viewer's own tap
+        // recognizer would take the touch from it (it cancels the touches it recognizes), and the
+        // scroll view would hold the first touch back while it waits to see a scroll
+        taps.isEnabled = !drawing
+        scroll.delaysContentTouches = !drawing
         zoomTaps = !drawing
     }
 
@@ -369,6 +377,12 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         let t = g.translation(in: self).x
         switch g.state {
         case .began:
+            if let land = pageLanding {
+                pageLanding = nil
+                scroll.layer.removeAllAnimations()
+                side.layer.removeAllAnimations()
+                land()
+            }
             sideDir = 0
             pendingTap?.cancel()
             pendingTap = nil
@@ -389,11 +403,9 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
                 // the finger's speed carries on into the spring
                 let rest = shift - current
                 let speed = abs(rest) > 1 ? max(0, min(30, v / rest)) : 0
-                UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.94, initialSpringVelocity: speed, options: [.allowUserInteraction, .beginFromCurrentState]) {
-                    self.scroll.transform = CGAffineTransform(translationX: shift, y: 0)
-                    self.placeSide(shift)
-                } completion: { _ in
-                    // the neighbour becomes the photo without a flicker; its sharp picture follows
+                // the neighbour becomes the photo without a flicker; its sharp picture follows
+                let land = { [weak self] in
+                    guard let self = self else { return }
                     if let n = next {
                         self.imageView.image = UIImage(cgImage: n)
                         self.current = n
@@ -405,6 +417,17 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
                     self.sideDir = 0
                     Haptics.tick()
                     self.onPage?(dir)
+                }
+                pageToken += 1
+                let token = pageToken
+                pageLanding = land
+                UIView.animate(withDuration: 0.42, delay: 0, usingSpringWithDamping: 0.94, initialSpringVelocity: speed, options: [.allowUserInteraction, .beginFromCurrentState]) {
+                    self.scroll.transform = CGAffineTransform(translationX: shift, y: 0)
+                    self.placeSide(shift)
+                } completion: { _ in
+                    guard self.pageToken == token, let l = self.pageLanding else { return }
+                    self.pageLanding = nil
+                    l()
                 }
             } else {
                 let speed = abs(current) > 1 ? max(0, min(30, -v / current)) : 0

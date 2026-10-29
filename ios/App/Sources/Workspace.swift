@@ -22,7 +22,7 @@ struct Workspace: View {
                         .transition(.move(edge: .top).combined(with: .opacity))
                 }
                 HStack(spacing: 0) {
-                    if tools && model.settings.toolsLeft {
+                    if tools && model.settings.toolsOnLeft {
                         ToolPanel(ed: ed).frame(width: panelW)
                             .transition(.move(edge: .leading))
                         Rectangle().fill(Lc.line).frame(width: 1)
@@ -31,7 +31,7 @@ struct Workspace: View {
                         ViewerArea(library: model.library, ed: ed, before: before)
                         Filmstrip(library: model.library, current: model.current)
                     }
-                    if tools && !model.settings.toolsLeft {
+                    if tools && !model.settings.toolsOnLeft {
                         Rectangle().fill(Lc.line).frame(width: 1)
                         ToolPanel(ed: ed).frame(width: panelW)
                             .transition(.move(edge: .trailing))
@@ -94,7 +94,7 @@ private struct WorkspaceBar: View {
     private var leading: some View {
         HStack(spacing: 2) {
             ToolIcon(icon: "house") { model.goHome() }
-            ToolIcon(icon: model.settings.toolsLeft ? "sidebar.left" : "sidebar.right", active: !model.toolsShown) {
+            ToolIcon(icon: model.settings.toolsOnLeft ? "sidebar.left" : "sidebar.right", active: !model.toolsShown) {
                 withAnimation(Motion.chrome) { model.toolsShown.toggle() }
             }
             Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 6)
@@ -128,7 +128,10 @@ private struct WorkspaceBar: View {
     private var trailing: some View {
         HStack(spacing: 2) {
             ToolIcon(icon: "arrow.uturn.backward", enabled: ed.canUndo) { ed.undo() }
+            // apart, so a thumb never takes one for the other
+            Spacer().frame(width: 18)
             ToolIcon(icon: "arrow.uturn.forward", enabled: ed.canRedo) { ed.redo() }
+            Spacer().frame(width: 6)
             Menu {
                 Button(role: .destructive) { ed.reset() } label: { Label("Azzera tutte le regolazioni", systemImage: "arrow.counterclockwise") }
             } label: {
@@ -370,6 +373,7 @@ private struct CropBar: View {
 /// No shots yet: where the link is.
 private struct EmptyViewer: View {
     @ObservedObject var tether: TetherLink
+    @Environment(\.screenShown) private var shown
 
     var body: some View {
         let (title, detail): (String, String) = {
@@ -384,7 +388,7 @@ private struct EmptyViewer: View {
             }
         }()
         return VStack(spacing: 14) {
-            ApertureLogo().frame(width: 64, height: 64)
+            ApertureLogo(animated: shown).frame(width: 64, height: 64)
             Text(title).font(Typo.title).foregroundColor(Lc.text)
             Text(detail).font(Typo.body).foregroundColor(Lc.text2).multilineTextAlignment(.center).frame(maxWidth: 380)
         }

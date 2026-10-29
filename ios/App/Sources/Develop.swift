@@ -203,7 +203,7 @@ enum Controls {
             "vignette.feather": "Sfumatura", "vignette.highlights": "Alteluci",
             "grain.amount": "Impatto", "grain.size": "Granularità", "grain.roughness": "Ruvidezza",
             "detail.sharpenAmount": "Quantità", "detail.sharpenRadius": "Raggio", "detail.sharpenDetail": "Dettaglio",
-            "detail.sharpenMasking": "Soglia", "detail.nrLuminance": "Luminanza", "detail.nrDetail": "Dettaglio",
+            "detail.sharpenMasking": "Mascheratura", "detail.nrLuminance": "Luminanza", "detail.nrDetail": "Dettaglio",
             "detail.nrContrast": "Contrasto", "detail.nrColor": "Colore", "detail.nrColorDetail": "Dettaglio colore",
             "detail.nrColorSmoothness": "Uniformità",
             "curve.highlights": "Alteluci", "curve.lights": "Chiari", "curve.darks": "Scuri", "curve.shadows": "Ombre",
@@ -242,6 +242,7 @@ enum Controls {
         if id == "wb.temp" { return .gradient([UIColor(hex: 0x3B6FD8), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xE8B83A)]) }
         if id == "wb.tint" { return .gradient([UIColor(hex: 0x3FAE5A), UIColor(hex: 0xD8D8D8), UIColor(hex: 0xD94FB0)]) }
         for b in Band.allCases {
+            if id == "bw.\(b.rawValue)" { return .gradient([UIColor(hex: 0x151515), b.ui, UIColor(hex: 0xF5F5F5)]) }
             if id == "mixer.\(b.rawValue).hue" { return .gradient(b.hueTrack) }
             if id == "mixer.\(b.rawValue).sat" { return .gradient([gray, b.ui]) }
             if id == "mixer.\(b.rawValue).lum" { return .gradient([UIColor(hex: 0x151515), b.ui, UIColor(hex: 0xF5F5F5)]) }

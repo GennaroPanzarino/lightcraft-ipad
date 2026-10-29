@@ -27,8 +27,9 @@ struct Settings: Codable, Equatable {
     var keepAwake = true
     var exportQuality = 92
     var exportEdge = 0
-    /// The tools on the left (Capture One's default) or on the right.
-    var toolsLeft = true
+    /// The tools on the left or on the right (the default, Lightroom's side). A new key: the
+    /// left side an earlier version saved as its default does not carry over.
+    var toolsOnLeft = false
     /// Rendering on the GPU (Metal); off: the CPU.
     var gpu = true
     /// The browser's thumbnail size (points).
@@ -50,7 +51,7 @@ struct Settings: Codable, Equatable {
         keepAwake = try c.decodeIfPresent(Bool.self, forKey: .keepAwake) ?? d.keepAwake
         exportQuality = try c.decodeIfPresent(Int.self, forKey: .exportQuality) ?? d.exportQuality
         exportEdge = try c.decodeIfPresent(Int.self, forKey: .exportEdge) ?? d.exportEdge
-        toolsLeft = try c.decodeIfPresent(Bool.self, forKey: .toolsLeft) ?? d.toolsLeft
+        toolsOnLeft = try c.decodeIfPresent(Bool.self, forKey: .toolsOnLeft) ?? d.toolsOnLeft
         gpu = try c.decodeIfPresent(Bool.self, forKey: .gpu) ?? d.gpu
         gridSize = try c.decodeIfPresent(Double.self, forKey: .gridSize) ?? d.gridSize
     }

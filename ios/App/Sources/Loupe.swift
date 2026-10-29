@@ -45,6 +45,9 @@ final class Loupe {
     var held: String?
     /// The editor takes a picture over (it shows it once processed): true when it does.
     var intercept: ((Pic) -> Bool)?
+    /// The app is out of sight: nothing is rendered (the GPU is not the app's then, and memory is
+    /// short) until it is back.
+    var paused = false
     static let keep = 6
 
     init(engine: Engine) { self.engine = engine }
@@ -90,7 +93,7 @@ final class Loupe {
     }
 
     func pump() {
-        guard !working, let next = wants.enumerated().first(where: { wanted($0.offset, $0.element) })?.element else { return }
+        guard !working, !paused, let next = wants.enumerated().first(where: { wanted($0.offset, $0.element) })?.element else { return }
         working = true
         Task {
             do {

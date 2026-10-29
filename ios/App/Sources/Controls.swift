@@ -13,8 +13,8 @@ private func winsOverScroll(_ other: UIGestureRecognizer) -> Bool {
 
 // MARK: - Slider
 
-/// Capture One's slider on one row: the name, a fine track, the value in a field. Drag anywhere on
-/// the row (relative: the value never jumps under the finger); move the finger up or down away from
+/// Lightroom's slider: the name and the value in a field above, the track below across the whole
+/// panel (the longer the track, the finer a finger sets it). Drag anywhere on the row (relative: the value never jumps under the finger); move the finger up or down away from
 /// the row while dragging for finer steps; double tap to go back to the default; tap the value to
 /// type one. A light tick is felt where the default is.
 final class ToolSlider: UIView, UIGestureRecognizerDelegate, UITextFieldDelegate {
@@ -45,9 +45,10 @@ final class ToolSlider: UIView, UIGestureRecognizerDelegate, UITextFieldDelegate
     private var lastX: CGFloat = 0
     private let ticker = UISelectionFeedbackGenerator()
 
-    static let height: CGFloat = 34
-    private let labelWidth: CGFloat = 100
+    static let height: CGFloat = 46
     private let fieldWidth: CGFloat = 54
+    /// Room at each end of the track for the knob.
+    private let inset: CGFloat = 9
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -127,15 +128,13 @@ final class ToolSlider: UIView, UIGestureRecognizerDelegate, UITextFieldDelegate
     }
 
     private var trackRect: CGRect {
-        let x0 = labelWidth + 8
-        let x1 = bounds.width - fieldWidth - 12
-        return CGRect(x: x0, y: bounds.midY - 1, width: max(20, x1 - x0), height: 2)
+        CGRect(x: inset, y: bounds.height - 14, width: max(20, bounds.width - 2 * inset), height: 2)
     }
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        label.frame = CGRect(x: 0, y: 0, width: labelWidth, height: bounds.height)
-        field.frame = CGRect(x: bounds.width - fieldWidth, y: (bounds.height - 24) / 2, width: fieldWidth, height: 24)
+        label.frame = CGRect(x: 0, y: 3, width: max(0, bounds.width - fieldWidth - 6), height: 21)
+        field.frame = CGRect(x: bounds.width - fieldWidth, y: 3, width: fieldWidth, height: 21)
         layoutTrack()
     }
 
@@ -197,7 +196,7 @@ final class ToolSlider: UIView, UIGestureRecognizerDelegate, UITextFieldDelegate
             layoutTrack()
         case .changed:
             // fine control: the farther the finger from the row, the smaller the steps
-            let away = max(0, abs(p.y - bounds.midY) - bounds.height)
+            let away = max(0, abs(p.y - bounds.midY) - bounds.height * 0.75)
             let factor = 1 / (1 + Double(away) / 60)
             let dx = Double(p.x - lastX)
             lastX = p.x

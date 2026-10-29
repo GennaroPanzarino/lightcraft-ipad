@@ -12,7 +12,7 @@ enum ToolGroup: String, CaseIterable, Identifiable {
         case .exposure: return "Base"
         case .color: return "Colore"
         case .composition: return "Composizione"
-        case .local: return "Regolazioni locali"
+        case .local: return "Maschere"
         case .details: return "Dettagli"
         case .lens: return "Obiettivo"
         case .retouch: return "Ritocco"
@@ -46,7 +46,7 @@ final class PanelState: ObservableObject {
 
     init() {
         let saved = UserDefaults.standard.stringArray(forKey: "collapsedTools")
-        collapsed = Set(saved ?? ["calibration", "fringe", "history", "keystone", "rotation"])
+        collapsed = Set(saved ?? ["calibration", "history"])
     }
 
     func toggle(_ id: String) {
@@ -150,53 +150,24 @@ struct ToolPanel: View {
                     }
                 }
                 Sliders(store: s, ids: ["profile.amount"])
-                Segment(options: ["Colore", "Bianco e nero"], selected: ed.bw ? 1 : 0) { ed.setBw($0 == 1) }
-                    .padding(.vertical, 6)
             }
-            ToolBox(id: "balance", title: "Bilanciamento colore", state: state, ed: ed, section: "grading") { ColorBalanceTool(store: s) }
-            ToolBox(id: "editor", title: "Editor colore", state: state, ed: ed, section: "mixer") { ColorEditorTool(store: s) }
-            ToolBox(id: "bw", title: "Bianco e nero", state: state, ed: ed, resetIds: Band.allCases.map { "bw.\($0.rawValue)" }) {
-                ToggleRow(label: "Abilita", on: ed.bw) { ed.setBw($0) }
-                HStack {
-                    Spacer()
-                    MiniButton(title: "Mix automatico") { ed.run("develop.autoBwMix") }
-                }
-                .padding(.bottom, 2)
-                Sliders(store: s, ids: Band.allCases.map { "bw.\($0.rawValue)" })
-            }
+            ToolBox(id: "balance", title: "Color Grading", state: state, ed: ed, section: "grading") { ColorBalanceTool(store: s) }
+            ToolBox(id: "editor", title: "Editor colore", state: state, ed: ed, section: "mixer") { ColorEditorTool(ed: ed) }
             ToolBox(id: "calibration", title: "Calibrazione", state: state, ed: ed, resetIds: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"]) {
                 Sliders(store: s, ids: ["calibration.shadowsTint", "calibration.redHue", "calibration.redSat", "calibration.greenHue", "calibration.greenSat", "calibration.blueHue", "calibration.blueSat"])
             }
         case .composition:
-            ToolBox(id: "crop", title: "Ritaglio", state: state) { CropTool(ed: ed) }
-            ToolBox(id: "rotation", title: "Rotazione e capovolgimento", state: state) {
-                HStack(spacing: 6) {
-                    FlatButton(title: "", icon: "rotate.left") { ed.run("photo.rotateLeft", ["ids": [ed.photo]]) }
-                    FlatButton(title: "", icon: "rotate.right") { ed.run("photo.rotateRight", ["ids": [ed.photo]]) }
-                    FlatButton(title: "", icon: "arrow.left.and.right.righttriangle.left.righttriangle.right") { ed.run("photo.flipHorizontal", ["ids": [ed.photo]]) }
-                    FlatButton(title: "", icon: "arrow.up.and.down.righttriangle.up.righttriangle.down") { ed.run("photo.flipVertical", ["ids": [ed.photo]]) }
-                }
-                .padding(.vertical, 4)
-            }
-            ToolBox(id: "keystone", title: "Trapezio", state: state, ed: ed, section: "geometry") {
-                MenuField(label: "Upright", value: uprightName(ed.upright)) {
-                    ForEach(["off", "auto", "level", "vertical", "full"], id: \.self) { u in
-                        Button(uprightName(u)) { ed.merge(["geometry": ["upright": u]], label: "Upright") }
-                    }
-                }
-                Sliders(store: s, ids: ["geometry.vertical", "geometry.horizontal", "geometry.rotate", "geometry.aspect", "geometry.scale", "geometry.offsetX", "geometry.offsetY"])
-            }
+            ToolBox(id: "crop", title: "Ritaglio e geometria", state: state) { GeometryTool(ed: ed) }
         case .local:
-            ToolBox(id: "layers", title: "Livelli", state: state) { LayersTool(ed: ed) }
+            ToolBox(id: "layers", title: "Maschere", state: state) { LayersTool(ed: ed) }
         case .details:
-            ToolBox(id: "sharpen", title: "Nitidezza", state: state, ed: ed, resetIds: ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"]) {
-                Sliders(store: s, ids: ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"])
-            }
-            ToolBox(id: "grain", title: "Grana pellicola", state: state, ed: ed, section: "grain") {
+            ToolBox(id: "detail", title: "Dettagli", state: state) {
+                SubHeader(title: "Nitidezza", ed: ed, resetIds: sharpenIds)
+                Sliders(store: s, ids: sharpenIds)
+                SubHeader(title: "Riduzione rumore", ed: ed, resetIds: noiseIds)
+                Sliders(store: s, ids: noiseIds)
+                SubHeader(title: "Grana", ed: ed, section: "grain")
                 Sliders(store: s, ids: ["grain.amount", "grain.size", "grain.roughness"])
-            }
-            ToolBox(id: "noise", title: "Riduzione rumore", state: state, ed: ed, resetIds: ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"]) {
-                Sliders(store: s, ids: ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"])
             }
         case .lens:
             ToolBox(id: "lens", title: "Correzione obiettivo", state: state, ed: ed, section: "optics") {
@@ -205,23 +176,25 @@ struct ToolPanel: View {
                     Sliders(store: s, ids: ["optics.profileDistortion", "optics.profileVignetting"],
                             labels: ["optics.profileDistortion": "Distors. profilo", "optics.profileVignetting": "Luce profilo"])
                 }
-                ToggleRow(label: "Aberrazione cromatica", on: ed.removeCA) { ed.merge(["optics": ["remove_ca": $0]], label: "Aberrazione cromatica") }
-                Sliders(store: s, ids: ["optics.distortion", "optics.vignetting", "optics.vignettingMidpoint"])
+                ToggleRow(label: "Rimuovi aberrazione cromatica", on: ed.removeCA) { ed.merge(["optics": ["remove_ca": $0]], label: "Aberrazione cromatica") }
+                SubHeader(title: "Frange colorate", ed: ed, resetIds: fringeIds)
+                Sliders(store: s, ids: fringeIds)
+                SubHeader(title: "Manuale", ed: ed, resetIds: ["optics.distortion", "optics.vignetting", "optics.vignettingMidpoint"])
+                Sliders(store: s, ids: ["optics.distortion"])
                 // the corrected photo's curved edges stay outside the crop
                 ToggleRow(label: "Vincola ritaglio", on: ed.constrainCrop) { ed.setConstrainCrop($0) }
+                Sliders(store: s, ids: ["optics.vignetting", "optics.vignettingMidpoint"])
             }
             ToolBox(id: "lensBlur", title: "Sfocatura obiettivo", state: state) { LensBlurTool(ed: ed) }
-            ToolBox(id: "fringe", title: "Frange colorate", state: state) {
-                Sliders(store: s, ids: ["optics.caRed", "optics.caBlue", "optics.defringePurple", "optics.defringePurpleHueLo", "optics.defringePurpleHueHi", "optics.defringeGreen", "optics.defringeGreenHueLo", "optics.defringeGreenHueHi"])
-            }
         case .retouch:
             ToolBox(id: "spots", title: "Rimozione macchie", state: state) { SpotTool(ed: ed) }
         case .adjustments:
             ToolBox(id: "styles", title: "Stili e preset", state: state) { StylesTool(ed: ed) }
             ToolBox(id: "history", title: "Cronologia", state: state) { HistoryTool(ed: ed) }
         case .metadata:
-            ToolBox(id: "rating", title: "Valutazione e tag", state: state) { RatingTool(library: model.library, key: ed.key) }
-            ToolBox(id: "exif", title: "Informazioni scatto", state: state) {
+            ToolBox(id: "info", title: "Valutazione e informazioni", state: state) {
+                RatingTool(library: model.library, key: ed.key)
+                Rectangle().fill(Lc.hairline).frame(height: 0.5).padding(.vertical, 6)
                 VStack(alignment: .leading, spacing: 0) {
                     if ed.meta.isEmpty {
                         Text("—").font(Typo.label).foregroundColor(Lc.text3).frame(height: 26)
@@ -309,7 +282,7 @@ private struct GroupHeader: View {
             Spacer()
         }
         .padding(.horizontal, 12)
-        .frame(height: 30)
+        .frame(height: 42)
         .background(Lc.window)
         .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
         .background(GeometryReader { g in
@@ -372,7 +345,7 @@ struct ToolBox<Content: View>: View {
             }
             .padding(.leading, 12)
             .padding(.trailing, 8)
-            .frame(height: 36)
+            .frame(height: 46)
             .background(Lc.header)
             if !folded {
                 VStack(alignment: .leading, spacing: 0) { content }
@@ -416,6 +389,31 @@ private struct ToolHeaderControls: View {
                 .buttonStyle(.plain)
             }
         }
+    }
+}
+
+private let sharpenIds = ["detail.sharpenAmount", "detail.sharpenRadius", "detail.sharpenDetail", "detail.sharpenMasking"]
+private let noiseIds = ["detail.nrLuminance", "detail.nrDetail", "detail.nrContrast", "detail.nrColor", "detail.nrColorDetail", "detail.nrColorSmoothness"]
+private let fringeIds = ["optics.defringePurple", "optics.defringePurpleHueLo", "optics.defringePurpleHueHi", "optics.defringeGreen", "optics.defringeGreenHueLo", "optics.defringeGreenHueHi", "optics.caRed", "optics.caBlue"]
+
+/// A part of a tool (Sharpening in Detail, Defringe in Lens Corrections): its name, its switch and
+/// its reset.
+struct SubHeader: View {
+    let title: String
+    var ed: EditorModel? = nil
+    var section: String? = nil
+    var resetIds: [String]? = nil
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Text(title.uppercased()).overline().fixedSize()
+            Rectangle().fill(Lc.hairline).frame(height: 0.5)
+            if let ed = ed {
+                ToolHeaderControls(ed: ed, section: section, resetIds: resetIds)
+            }
+        }
+        .frame(height: 34)
+        .padding(.top, 6)
     }
 }
 
@@ -526,32 +524,90 @@ func presetGroups(_ presets: [Preset]) -> [String] {
 
 // MARK: - Composition
 
-private struct CropTool: View {
+/// Crop, straighten, rotate and flip, perspective: one tool, in the order they are used.
+private struct GeometryTool: View {
     @ObservedObject var ed: EditorModel
     private let ratios: [(String, String)] = [
         ("original", "Originale"), ("free", "Libero"), ("1x1", "1:1"), ("4x5", "4:5"), ("5x7", "5:7"),
         ("2x3", "2:3"), ("4x3", "4:3"), ("16x9", "16:9"), ("16x10", "16:10"),
     ]
+    private let uprights: [(String, String)] = [("off", "No"), ("auto", "Auto"), ("level", "Livello"), ("vertical", "Vert."), ("full", "Tutto")]
+    private let perspectiveIds = ["geometry.vertical", "geometry.horizontal", "geometry.rotate", "geometry.aspect", "geometry.scale", "geometry.offsetX", "geometry.offsetY"]
 
     var body: some View {
+        let cropping = ed.cursorTool == .crop
         VStack(alignment: .leading, spacing: 0) {
-            MenuField(label: "Proporzioni", value: aspectName(ed.cropAspect)) {
-                ForEach(ratios, id: \.0) { r in
-                    Button(r.1) { ed.run("crop.aspect", ["aspect": r.0]) }
+            FlatButton(title: cropping ? "Fine" : "Ritaglia sulla foto", icon: "crop", prominent: cropping) {
+                if cropping { ed.exitCrop() } else { ed.enterCrop() }
+            }
+            .padding(.top, 4)
+            HStack(spacing: 6) {
+                MenuField(label: "Proporzioni", value: aspectName(ed.cropAspect)) {
+                    ForEach(ratios, id: \.0) { r in
+                        Button(r.1) { ed.run("crop.aspect", ["aspect": r.0]) }
+                    }
                 }
+                IconButton(icon: "rectangle.portrait.rotate") { ed.run("crop.rotateAspect") }
             }
-            FlatButton(title: ed.cursorTool == .crop ? "Fine" : "Ritaglia sulla foto", icon: "crop", prominent: ed.cursorTool == .crop) {
-                if ed.cursorTool == .crop { ed.exitCrop() } else { ed.enterCrop() }
-            }
-            .padding(.vertical, 4)
+            .padding(.top, 4)
             Sliders(store: ed.store, ids: ["crop.angle"])
             HStack(spacing: 6) {
                 FlatButton(title: "Livella", icon: "level") { ed.run("crop.autoStraighten") }
-                FlatButton(title: "Ruota", icon: "rotate.right") { ed.run("crop.rotateAspect") }
-                FlatButton(title: "Azzera", icon: "arrow.counterclockwise") { ed.run("crop.reset") }
+                FlatButton(title: "Azzera ritaglio", icon: "arrow.counterclockwise") { ed.run("crop.reset") }
             }
             .padding(.vertical, 4)
+            SubHeader(title: "Ruota e capovolgi")
+            HStack(spacing: 6) {
+                LabeledIcon(icon: "rotate.left", label: "Sinistra") { ed.run("photo.rotateLeft", ["ids": [ed.photo]]) }
+                LabeledIcon(icon: "rotate.right", label: "Destra") { ed.run("photo.rotateRight", ["ids": [ed.photo]]) }
+                LabeledIcon(icon: "arrow.left.and.right.righttriangle.left.righttriangle.right", label: "Orizz.") { ed.run("photo.flipHorizontal", ["ids": [ed.photo]]) }
+                LabeledIcon(icon: "arrow.up.and.down.righttriangle.up.righttriangle.down", label: "Vert.") { ed.run("photo.flipVertical", ["ids": [ed.photo]]) }
+            }
+            SubHeader(title: "Prospettiva", ed: ed, section: "geometry")
+            Segment(options: uprights.map(\.1), selected: uprights.firstIndex { $0.0 == ed.upright } ?? 0) { i in
+                ed.merge(["geometry": ["upright": uprights[i].0]], label: "Upright")
+            }
+            .padding(.bottom, 4)
+            Sliders(store: ed.store, ids: perspectiveIds)
         }
+    }
+}
+
+/// A square button with an icon (beside a menu or a field).
+struct IconButton: View {
+    let icon: String
+    var active = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon).font(.system(size: 14)).foregroundColor(active ? Color.black : Lc.text)
+                .frame(width: 38, height: 30)
+                .background(active ? Lc.accent : Lc.raised)
+                .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .buttonStyle(PressStyle())
+    }
+}
+
+/// An icon over its name, a quarter of the row wide.
+struct LabeledIcon: View {
+    let icon: String
+    let label: String
+    var active = false
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: icon).font(.system(size: 15)).foregroundColor(active ? Color.black : Lc.text)
+                Text(label).font(Typo.caption).foregroundColor(active ? Color.black : Lc.text2).lineLimit(1).minimumScaleFactor(0.8)
+            }
+            .frame(maxWidth: .infinity, minHeight: 50)
+            .background(active ? Lc.accent : Lc.raised)
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+        }
+        .buttonStyle(PressStyle())
     }
 }
 
@@ -722,27 +778,39 @@ private struct ColorBalanceTool: View {
     }
 }
 
-/// The colour editor: pick a band, set its hue, saturation and lightness.
+/// The colour editor: pick a band, set its hue, saturation and lightness. Its Black & White switch
+/// turns the photo grey and the bands into the mix (how light each colour becomes).
 private struct ColorEditorTool: View {
-    let store: DevelopStore
+    @ObservedObject var ed: EditorModel
     @State private var band: Band = .red
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 0) {
-                ForEach(Band.allCases) { b in
-                    Button { band = b } label: {
-                        Circle().fill(b.color)
-                            .frame(width: 20, height: 20)
-                            .overlay(Circle().stroke(Color.white, lineWidth: b == band ? 2 : 0))
-                            .frame(maxWidth: .infinity, minHeight: 32)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
+            ToggleRow(label: "Bianco e nero", on: ed.bw) { ed.setBw($0) }
+            if ed.bw {
+                HStack(spacing: 6) {
+                    Text("Mix bianco e nero").font(Typo.labelStrong).foregroundColor(Lc.text)
+                    Spacer()
+                    MiniButton(title: "Auto") { ed.run("develop.autoBwMix") }
+                    MiniButton(title: "Azzera") { ed.resetControls(Band.allCases.map { "bw.\($0.rawValue)" }) }
                 }
+                Sliders(store: ed.store, ids: Band.allCases.map { "bw.\($0.rawValue)" })
+            } else {
+                HStack(spacing: 0) {
+                    ForEach(Band.allCases) { b in
+                        Button { band = b } label: {
+                            Circle().fill(b.color)
+                                .frame(width: 20, height: 20)
+                                .overlay(Circle().stroke(Color.white, lineWidth: b == band ? 2 : 0))
+                                .frame(maxWidth: .infinity, minHeight: 32)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                Text(band.label).font(Typo.labelStrong).foregroundColor(Lc.text)
+                Sliders(store: ed.store, ids: ["mixer.\(band.rawValue).hue", "mixer.\(band.rawValue).sat", "mixer.\(band.rawValue).lum"])
             }
-            Text(band.label).font(Typo.labelStrong).foregroundColor(Lc.text)
-            Sliders(store: store, ids: ["mixer.\(band.rawValue).hue", "mixer.\(band.rawValue).sat", "mixer.\(band.rawValue).lum"])
         }
     }
 }
@@ -1120,19 +1188,45 @@ private struct StyleRow: View {
     }
 }
 
+/// LightCraft's History labels (Lightroom's, in English) in Italian; the app's own are already.
+func historyName(_ label: String) -> String {
+    if label.isEmpty { return "Modifica" }
+    if label.hasPrefix("History: ") { return historyName(String(label.dropFirst(9))) }
+    if label.hasPrefix("Preset: ") { return "Stile: " + label.dropFirst(8) }
+    let names = [
+        "Import": "Importazione", "Remove": "Rimozione macchia", "Edit Spot": "Modifica macchia", "Delete Spot": "Elimina macchia",
+        "Find Dust Spots": "Trova polvere", "Find Blemishes": "Trova imperfezioni", "Add Mask": "Nuova maschera", "Edit Mask": "Modifica maschera",
+        "Brush": "Pennello", "Mask Adjustment": "Regolazione maschera", "Color Range": "Gamma colore", "Delete Mask": "Elimina maschera",
+        "Delete All Masks": "Elimina le maschere", "Rename Mask": "Rinomina maschera", "Invert Mask": "Inverti maschera",
+        "Toggle Mask": "Mostra/nascondi maschera", "Duplicate Mask": "Duplica maschera", "Duplicate and Invert Mask": "Duplica e inverti",
+        "Reorder Masks": "Ordine maschere", "Refine Edges": "Rifinisci bordi", "Object Mask": "Selezione oggetto",
+        "Invert Component": "Inverti componente", "Duplicate Component": "Duplica componente", "Delete Component": "Elimina componente",
+        "Rename Component": "Rinomina componente", "Change Component Mode": "Modalità componente", "Reset": "Azzera tutto",
+        "Reset Edits": "Azzera tutto", "Paste Settings": "Incolla regolazioni", "Paste from Previous": "Incolla dalla precedente",
+        "Sync Settings": "Sincronizza", "Rotate": "Ruota", "Flip": "Capovolgi", "Auto": "Auto", "Auto Settings": "Auto",
+        "Auto B&W Mix": "Mix B/N automatico", "Auto Straighten": "Livella", "White Balance": "Bilanciamento del bianco",
+        "White Balance Selector": "Contagocce bianco", "Black & White": "Bianco e nero", "Treatment": "Bianco e nero", "Profile": "Profilo",
+        "Set Profile": "Profilo", "Crop": "Ritaglio", "Crop Aspect": "Proporzioni", "Rotate Crop Aspect": "Ruota proporzioni",
+        "Reset Crop": "Azzera ritaglio", "Straighten": "Raddrizza", "Tone Curve": "Curva", "Set Point Curve": "Curva",
+        "Toggle Section": "Attiva/disattiva", "Edit": "Modifica", "AI Denoise": "Riduzione rumore AI", "Cleared History": "Cronologia azzerata",
+        "Read Metadata from File": "Metadati dal file", "Match Total Exposures": "Uniforma esposizioni",
+    ]
+    return names[label] ?? label
+}
+
 private struct HistoryTool: View {
     @ObservedObject var ed: EditorModel
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 6) {
+            HStack(spacing: 20) {
                 FlatButton(title: "Annulla", icon: "arrow.uturn.backward", enabled: ed.canUndo) { ed.undo() }
                 FlatButton(title: "Ripeti", icon: "arrow.uturn.forward", enabled: ed.canRedo) { ed.redo() }
             }
             .padding(.vertical, 4)
             ForEach(Array(ed.history.enumerated().reversed()), id: \.offset) { i, label in
                 HStack {
-                    Text(label.isEmpty ? "Modifica" : label).font(Typo.label)
+                    Text(historyName(label)).font(Typo.label)
                         .foregroundColor(i == ed.cursor ? Lc.text : (i > ed.cursor ? Lc.text3 : Lc.text2))
                     Spacer()
                     if i == ed.cursor { Image(systemName: "circle.fill").font(.system(size: 5)).foregroundColor(Lc.accent) }

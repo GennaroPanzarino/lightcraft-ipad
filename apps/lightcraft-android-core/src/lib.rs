@@ -76,10 +76,12 @@ impl Core {
     /// One command: `{"ok": true, "result": …}` or `{"ok": false, "error": …}`.
     pub fn execute(&mut self, command: &str, params: &str) -> Value {
         let p: Value = if params.trim().is_empty() { json!({}) } else { serde_json::from_str(params).unwrap_or(json!({})) };
-        // memory is short (the app shrinks the budget): the zoomed photo's original goes too
+        // memory is short (the app shrinks the budget): the zoomed photo's original and the
+        // loupe's stages go too
         if command == "app.memoryBudget" && p.get("mb").and_then(Value::as_f64).is_some_and(|mb| mb < 200.0) {
             self.session.media.set_on_screen(None);
             self.zoom = None;
+            self.stages = None;
         }
         match self.session.execute(command, &p) {
             Ok(r) => json!({"ok": true, "result": r}),
@@ -574,6 +576,121 @@ mod tests {
         let e = c.export_jpeg(id, &out.to_string_lossy(), 90, Some(2000)).unwrap();
         eprintln!("export {e}");
         assert!(out.is_file());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests_undo {
+    use super::*;
+
+    /// The app's edits one after another (`LC_TEST_ARW=raw`), then Undo all the way back: each
+    /// step must change the settings.
+    #[test]
+    fn undo_steps_back_through_the_apps_edits() {
+        let Some(raw) = std::env::var_os("LC_TEST_ARW") else { return };
+        let dir = std::env::temp_dir().join(format!("lc-android-core-undo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut c = Core::open(&dir.to_string_lossy(), 0, false).unwrap();
+        let r = c.execute("library.import", &json!({"paths": [raw.to_string_lossy()]}).to_string());
+        let id = r["result"]["imported"][0].as_u64().expect("imported");
+        let sel = json!({"ids": [id], "active": id}).to_string();
+        let run = |c: &mut Core, cmd: &str, p: Value| {
+            c.execute("library.select", &sel);
+            let r = c.execute(cmd, &p.to_string());
+            eprintln!("{cmd}: {}", if r["ok"] == true { "ok".to_string() } else { r.to_string() });
+            r
+        };
+        run(&mut c, "develop.beginInteraction", json!({"label": "Esposizione"}));
+        run(&mut c, "develop.set", json!({"ids": [id], "values": {"light.exposure": 0.7}}));
+        run(&mut c, "develop.endInteraction", json!({}));
+        run(&mut c, "spot.add", json!({"mode": "heal", "points": [[0.3, 0.4]], "size": 0.015}));
+        run(&mut c, "mask.add", json!({"kind": "brush", "name": "Pennello"}));
+        let d = c.execute("develop.get", &json!({"id": id}).to_string());
+        let masks = d["result"]["masks"].clone();
+        eprintln!("masks {masks}");
+        let mid = masks[0]["id"].as_u64().unwrap_or(0);
+        run(&mut c, "mask.brushStroke", json!({"id": mid, "points": [[0.2, 0.2], [0.4, 0.3]], "size": 0.03, "feather": 50, "flow": 100, "erase": false}));
+        run(&mut c, "develop.beginInteraction", json!({"label": "Esposizione"}));
+        run(&mut c, "mask.adjust", json!({"id": mid, "values": {"exposure": 1.0}}));
+        run(&mut c, "develop.endInteraction", json!({}));
+        let h = c.execute("history.list", &json!({"id": id}).to_string());
+        eprintln!("history {}", h["result"]);
+        let mut last = c.execute("develop.get", &json!({"id": id}).to_string())["result"].clone();
+        for i in 0..8 {
+            let r = run(&mut c, "history.previous", json!({}));
+            if r["ok"] != true {
+                break;
+            }
+            let now = c.execute("develop.get", &json!({"id": id}).to_string())["result"].clone();
+            let h = c.execute("history.list", &json!({"id": id}).to_string());
+            eprintln!("undo {i}: cursor {} changed {}", h["result"]["cursor"], now != last);
+            assert_ne!(now, last, "undo {i} changed nothing");
+            last = now;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod tests_mask_speed {
+    use super::*;
+
+    /// What a painted layer costs (`LC_TEST_ARW=raw`): renders of the screen with a brush mask of
+    /// many strokes, a gradient and a colour range, and the mask drawn alone.
+    #[test]
+    fn mask_render_times() {
+        let Some(raw) = std::env::var_os("LC_TEST_ARW") else { return };
+        let dir = std::env::temp_dir().join(format!("lc-android-core-masks-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut c = Core::open(&dir.to_string_lossy(), 0, false).unwrap();
+        let r = c.execute("library.import", &json!({"paths": [raw.to_string_lossy()]}).to_string());
+        let id = r["result"]["imported"][0].as_u64().expect("imported");
+        let sel = json!({"ids": [id], "active": id}).to_string();
+        let mut buf = vec![0u8; 2400 * 2400 * 4];
+        let t = |c: &mut Core, buf: &mut Vec<u8>, what: &str, draft: bool| {
+            let v = c.render(id, 2388, 1668, draft, buf).unwrap();
+            eprintln!("{what}{}: {} ms", if draft { " (draft)" } else { "" }, v["ms"]);
+        };
+        t(&mut c, &mut buf, "plain", false);
+        t(&mut c, &mut buf, "plain again", false);
+        c.execute("library.select", &sel);
+        c.execute("mask.add", &json!({"kind": "brush", "name": "B"}).to_string());
+        for k in 0..40 {
+            let y = 0.1 + 0.02 * k as f64;
+            c.execute("library.select", &sel);
+            let pts: Vec<Value> = (0..30).map(|i| json!([0.1 + 0.025 * i as f64, y + 0.01 * ((i as f64) / 4.0).sin()])).collect();
+            c.execute("mask.brushStroke", &json!({"id": 1, "points": pts, "size": 0.03, "feather": 50, "flow": 100}).to_string());
+        }
+        c.execute("library.select", &sel);
+        c.execute("mask.adjust", &json!({"id": 1, "values": {"exposure": 1.0}}).to_string());
+        t(&mut c, &mut buf, "brush 40 strokes", false);
+        t(&mut c, &mut buf, "brush again", false);
+        t(&mut c, &mut buf, "brush", true);
+        c.execute("library.select", &sel);
+        c.execute("mask.adjust", &json!({"id": 1, "values": {"exposure": 0.5}}).to_string());
+        t(&mut c, &mut buf, "brush, slider moved", true);
+        t(&mut c, &mut buf, "brush, slider moved", false);
+        c.execute("library.select", &sel);
+        c.execute("mask.brushStroke", &json!({"id": 1, "points": [[0.5, 0.5], [0.6, 0.55]], "size": 0.03}).to_string());
+        t(&mut c, &mut buf, "one more stroke", false);
+        let tm = Instant::now();
+        let v = c.render_mask(id, 1, 1194, 834, &mut buf);
+        eprintln!("mask alone: {:?} in {:.0} ms", v.map(|v| v["ms"].clone()), tm.elapsed().as_secs_f64() * 1000.0);
+        c.execute("library.select", &sel);
+        c.execute("mask.add", &json!({"kind": "radial", "name": "R"}).to_string());
+        c.execute("library.select", &sel);
+        c.execute("mask.adjust", &json!({"id": 2, "values": {"exposure": -1.0}}).to_string());
+        t(&mut c, &mut buf, "brush + radial", false);
+        c.execute("library.select", &sel);
+        c.execute("mask.add", &json!({"kind": "colorRange", "name": "C"}).to_string());
+        c.execute("library.select", &sel);
+        let s = c.execute("mask.sampleColor", &json!({"id": 3, "x": 0.5, "y": 0.5}).to_string());
+        eprintln!("sample {}", s["ok"]);
+        c.execute("library.select", &sel);
+        c.execute("mask.adjust", &json!({"id": 3, "values": {"saturation": -50}}).to_string());
+        t(&mut c, &mut buf, "brush + radial + colour", false);
+        t(&mut c, &mut buf, "brush + radial + colour", true);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

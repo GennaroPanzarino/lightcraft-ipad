@@ -774,8 +774,9 @@ pub fn specs() -> Vec<CommandSpec> {
             |s, p| {
                 let c = "spot.findDust";
                 let id = s.active().ok_or_else(|| bad(c, "no active photo"))?;
-                // the uncropped photo, so positions are the spots' own coordinates
-                let job = s.render_job(id, 1600, 1600, false, false).ok_or_else(|| bad(c, "no photo"))?;
+                // the uncropped photo, so positions are the spots' own coordinates; large enough
+                // that the small specks of a stopped-down lens are a few pixels across
+                let job = s.render_job(id, 2400, 2400, false, false).ok_or_else(|| bad(c, "no photo"))?;
                 let img = job.run().rendered.map_err(|e| bad(c, e))?.image;
                 let found = lightcraft_pipeline::dust::detect(&img, f64_or(p, "sensitivity", 50.0) as f32);
                 let out: Vec<Value> = found.iter().map(|d| json!({"x": d.x, "y": d.y, "size": d.radius})).collect();

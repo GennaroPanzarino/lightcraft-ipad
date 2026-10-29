@@ -199,11 +199,13 @@ struct TagPicker: View {
 struct StatusDot: View {
     let color: Color
     let pulsing: Bool
+    @Environment(\.screenShown) private var shown
     @State private var phase = false
 
     var body: some View {
         ZStack {
-            if pulsing {
+            // (a screen kept made but not shown draws nothing every frame)
+            if pulsing && shown {
                 Circle().fill(color.opacity(0.45)).frame(width: 8, height: 8)
                     .scaleEffect(phase ? 2.2 : 1).opacity(phase ? 0 : 1)
                     .animation(.easeOut(duration: 1.4).repeatForever(autoreverses: false), value: phase)
@@ -266,6 +268,19 @@ struct Field: View {
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 4, style: .continuous).stroke(focused ? Lc.accent.opacity(0.7) : Lc.hairline2, lineWidth: focused ? 1 : 0.5))
         }
+    }
+}
+
+/// Whether the screen a view is on is the one shown (the workspace and the library both stay made;
+/// the hidden one's animations stop).
+private struct ScreenShown: EnvironmentKey {
+    static let defaultValue = true
+}
+
+extension EnvironmentValues {
+    var screenShown: Bool {
+        get { self[ScreenShown.self] }
+        set { self[ScreenShown.self] = newValue }
     }
 }
 

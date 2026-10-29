@@ -167,6 +167,12 @@ final class AppModel: ObservableObject {
             NotificationCenter.default.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
                 Task { @MainActor in await self?.memoryWarning() }
             }
+            NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.leftForeground() }
+            }
+            NotificationCenter.default.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in await self?.backInForeground() }
+            }
             let list = try await engine.array("develop.controls")
             editor.store.setControls(Controls.from(list))
             presets = try await presetsOf(engine)
@@ -545,6 +551,26 @@ final class AppModel: ObservableObject {
         _ = try? await engine.exec("app.memoryBudget", ["mb": 96])
         _ = try? await previews.exec("app.memoryBudget", ["mb": 64])
         try? await Task.sleep(nanoseconds: 3_000_000_000)
+        _ = try? await engine.exec("app.memoryBudget", ["mb": AppModel.cacheBudget()])
+        _ = try? await previews.exec("app.memoryBudget", ["mb": 256])
+    }
+
+    /// Out of sight (another app in front): the caches go at once. iPadOS gives an app in the
+    /// background little memory, and while it takes a large one back every other app stutters,
+    /// switching between apps included. The pictures come back on return.
+    private func leftForeground() async {
+        let task = UIApplication.shared.beginBackgroundTask(withName: "lightcraft-trim")
+        loupe.paused = true
+        loupe.trim()
+        _ = try? await engine.exec("app.memoryBudget", ["mb": 64])
+        _ = try? await previews.exec("app.memoryBudget", ["mb": 48])
+        NSLog("lightcraft: background, \(os_proc_available_memory() / 1_048_576) MB free")
+        if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+    }
+
+    private func backInForeground() async {
+        loupe.paused = false
+        loupe.pump()
         _ = try? await engine.exec("app.memoryBudget", ["mb": AppModel.cacheBudget()])
         _ = try? await previews.exec("app.memoryBudget", ["mb": 256])
     }
