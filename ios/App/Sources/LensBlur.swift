@@ -499,8 +499,10 @@ final class Bokeh {
         guard let sharp = texture(.rgba8Unorm, w, h, write: false), let out = texture(.rgba8Unorm, w, h) else { return nil }
         sharp.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: pixels, bytesPerRow: w * 4)
         // the blur map
-        guard let mapTex = texture(.r32Float, map.width, map.height, write: false) else { return nil }
-        map.values.withUnsafeBytes { mapTex.replace(region: MTLRegionMake2D(0, 0, map.width, map.height), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: map.width * 4) }
+        // (8 bits: filtered on every GPU, unlike 32-bit floats)
+        guard let mapTex = texture(.r8Unorm, map.width, map.height, write: false) else { return nil }
+        let bytes = map.values.map { UInt8(max(0, min(255, ($0 * 255).rounded()))) }
+        mapTex.replace(region: MTLRegionMake2D(0, 0, map.width, map.height), mipmapLevel: 0, withBytes: bytes, bytesPerRow: map.width)
         // linear light at half size, with its pyramid
         let hw = max(1, w / 2), hh = max(1, h / 2)
         guard let half = texture(.rgba16Float, hw, hh, mips: true) else { return nil }

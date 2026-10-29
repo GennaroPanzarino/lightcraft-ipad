@@ -694,3 +694,27 @@ mod tests_mask_speed {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+#[cfg(test)]
+mod tests_dust {
+    use super::*;
+
+    /// The dust found on a raw (`LC_TEST_ARW`), and the photo it was found on (`LC_DUST_OUT`: a
+    /// JPEG and the spots as JSON beside it), to look at.
+    #[test]
+    fn dust_on_a_real_photo() {
+        let (Some(raw), Ok(out)) = (std::env::var_os("LC_TEST_ARW"), std::env::var("LC_DUST_OUT")) else { return };
+        let dir = std::env::temp_dir().join(format!("lc-android-core-dust-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut c = Core::open(&dir.to_string_lossy(), 0, false).unwrap();
+        let r = c.execute("library.import", &json!({"paths": [raw.to_string_lossy()]}).to_string());
+        let id = r["result"]["imported"][0].as_u64().expect("imported");
+        c.execute("library.select", &json!({"ids": [id], "active": id}).to_string());
+        let t = Instant::now();
+        let r = c.execute("spot.findDust", &json!({"add": false}).to_string());
+        eprintln!("dust in {:.0} ms: {}", t.elapsed().as_secs_f64() * 1000.0, r["result"]["spots"].as_array().map_or(0, |a| a.len()));
+        std::fs::write(format!("{out}.json"), r["result"]["spots"].to_string()).unwrap();
+        c.export_jpeg(id, &format!("{out}.jpg"), 90, Some(2400)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

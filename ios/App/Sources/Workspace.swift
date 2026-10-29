@@ -53,25 +53,32 @@ private struct KeyCommands: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ed: EditorModel
     @Binding var export: Bool
+    /// A field is being typed in: the plain keys are its own.
+    @State private var typing = false
 
     var body: some View {
         ZStack {
             key("z", .command) { ed.undo() }
             key("z", [.command, .shift]) { ed.redo() }
-            key(.leftArrow, []) { model.step(-1) }
-            key(.rightArrow, []) { model.step(1) }
             key("e", .command) { export = true }
-            key(.escape, []) {
-                if ed.cursorTool == .crop { ed.exitCrop() } else { ed.cursorTool = .none }
-                ed.picking = false
+            Group {
+                key(.leftArrow, []) { model.step(-1) }
+                key(.rightArrow, []) { model.step(1) }
+                key(.escape, []) {
+                    if ed.cursorTool == .crop { ed.exitCrop() } else { ed.cursorTool = .none }
+                    ed.picking = false
+                }
+                ForEach(0..<6) { n in
+                    key(KeyEquivalent(Character("\(n)")), []) { if let k = model.current { model.rate([k], n) } }
+                }
+                key("p", []) { if let k = model.current { model.flag([k], "pick") } }
+                key("x", []) { if let k = model.current { model.flag([k], "reject") } }
+                key("u", []) { if let k = model.current { model.flag([k], "none") } }
             }
-            ForEach(0..<6) { n in
-                key(KeyEquivalent(Character("\(n)")), []) { if let k = model.current { model.rate([k], n) } }
-            }
-            key("p", []) { if let k = model.current { model.flag([k], "pick") } }
-            key("x", []) { if let k = model.current { model.flag([k], "reject") } }
-            key("u", []) { if let k = model.current { model.flag([k], "none") } }
+            .disabled(typing)
         }
+        .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidBeginEditingNotification)) { _ in typing = true }
+        .onReceive(NotificationCenter.default.publisher(for: UITextField.textDidEndEditingNotification)) { _ in typing = false }
         .frame(width: 0, height: 0)
         .opacity(0)
         .allowsHitTesting(false)

@@ -796,8 +796,16 @@ final class EditorModel: ObservableObject {
     /// what LightCraft has.
     func run(_ command: String, _ params: [String: Any] = [:]) { send(.command(command, params)) }
 
-    func undo() { run("history.previous") }
-    func redo() { run("history.next") }
+    /// Undo and redo, each saying what it took back or brought back.
+    func undo() {
+        if cursor > 0, cursor < history.count { onNotice?("Annullato: \(historyName(history[cursor]))") }
+        run("history.previous")
+    }
+
+    func redo() {
+        if cursor + 1 < history.count { onNotice?("Ripristinato: \(historyName(history[cursor + 1]))") }
+        run("history.next")
+    }
     func reset() { preset = nil; run("develop.reset", ["ids": [photo]]) }
     func setBw(_ on: Bool) { run("develop.treatment", ["bw": on]) }
     func whiteBalance(_ mode: String) { picking = false; run("develop.wb", ["mode": mode]) }

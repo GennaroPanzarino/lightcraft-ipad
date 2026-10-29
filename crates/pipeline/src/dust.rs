@@ -4,7 +4,9 @@
 //! must be small and roughly round. Dust is a shadow on the sensor, which tells it from the
 //! scene's own small dark things: it darkens by a few percent (a bird or a leaf by far more), it
 //! darkens every colour alike (it has no colour of its own), and its edge is soft (a dark object's
-//! is sharp).
+//! is sharp). It is looked for where it shows and nothing else looks like it: on grey or blue
+//! surfaces (sky, walls, a backdrop), not on skin or foliage, whose own pores, freckles and
+//! shadows are small soft dark spots too.
 
 use lightcraft_raster::{Plane, Rgba8, blur::gaussian};
 
@@ -19,7 +21,9 @@ pub struct DustSpot {
 }
 
 /// The darkest a dust shadow gets, relative to its surroundings (a darker spot is the scene's).
-const MAX_DARKENING: f32 = 0.38;
+const MAX_DARKENING: f32 = 0.25;
+/// The most colourful a surface dust is looked for on may be (but a blue sky, however deep).
+const MAX_SURFACE_SATURATION: f32 = 0.09;
 
 /// Dust spots in a rendered image; `sensitivity` 0..100 (higher finds fainter spots).
 pub fn detect(img: &Rgba8, sensitivity: f32) -> Vec<DustSpot> {
@@ -35,7 +39,14 @@ pub fn detect(img: &Rgba8, sensitivity: f32) -> Vec<DustSpot> {
         0.2126 * r.data[i] + 0.7152 * g.data[i] + 0.0722 * b.data[i]
     });
     let sigma = (0.012 * long).max(2.0);
-    let around = gaussian(&l, sigma);
+    // the surroundings without what is brighter than them (a highlight, a crystal, a lamp): beside
+    // a bright thing the plain surface would otherwise look darker than its surroundings
+    let first = gaussian(&l, sigma);
+    let below = Plane::from_fn(w, h, |x, y| {
+        let i = y * w + x;
+        l.data[i].min(first.data[i] * 1.03)
+    });
+    let around = gaussian(&below, sigma);
     // texture: local mean of the fine detail (what isn't explained by the surroundings)
     let detail = Plane::from_fn(w, h, |x, y| (l.data[y * w + x] - around.data[y * w + x]).abs());
     let texture = gaussian(&detail, (0.02 * long).max(3.0));
@@ -102,6 +113,20 @@ pub fn detect(img: &Rgba8, sensitivity: f32) -> Vec<DustSpot> {
         let mean = (loss[0] + loss[1] + loss[2]) / 3.0;
         let spread = loss.iter().fold(f32::MIN, |a, v| a.max(*v)) - loss.iter().fold(f32::MAX, |a, v| a.min(*v));
         if mean <= 0.0 || spread > 0.6 * mean + 0.004 * n as f32 {
+            continue;
+        }
+        // the blob's middle
+        let c = (sy / n as f64).round() as usize * w + (sx / n as f64).round() as usize;
+        // not beside something bright (a crystal's dark facet, a lamp's fitting)
+        if first.data[c] > around.data[c] * 1.015 {
+            continue;
+        }
+        // on a grey or blue surface
+        let (sr, sg, sb) = (t[0].data[c], t[1].data[c], t[2].data[c]);
+        let (hi, lo) = (sr.max(sg).max(sb), sr.min(sg).min(sb));
+        let saturation = if hi > 0.0 { (hi - lo) / hi } else { 0.0 };
+        let blue = sb >= hi - 1e-4 || (sb > sr && sg > sr && saturation > 0.0);
+        if saturation > MAX_SURFACE_SATURATION && !blue {
             continue;
         }
         out.push(DustSpot {
@@ -184,6 +209,23 @@ mod tests {
         let found = detect(&img, 60.0);
         assert_eq!(found.len(), 1, "{found:?}");
         assert!((found[0].x * w as f64 - 250.0).abs() < 3.0 && (found[0].y * h as f64 - 300.0).abs() < 3.0, "{found:?}");
+    }
+
+    /// Skin with its freckles and a pendant's soft shadow: no dust.
+    #[test]
+    fn skin_is_not_searched() {
+        let (w, h) = (600usize, 400usize);
+        let img = picture(w, h, |x, y| {
+            let mut c = [0.86, 0.66, 0.55];
+            let d = |cx: f32, cy: f32| ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            for (cx, cy) in [(120.0, 100.0), (300.0, 220.0), (480.0, 300.0), (200.0, 320.0)] {
+                let k = (-d(cx, cy).powi(2) / 20.0).exp();
+                c = c.map(|v| v * (1.0 - 0.08 * k));
+            }
+            let _ = y;
+            c
+        });
+        assert!(detect(&img, 70.0).is_empty());
     }
 
     #[test]
