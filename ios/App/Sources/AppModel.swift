@@ -363,7 +363,10 @@ final class AppModel: ObservableObject {
         }
         log("subject \(editor.masks.contains { $0.kind == "subject" } ? "ok" : "none")")
         editor.addMask("depthRange")
-        await wait(3)
+        for _ in 0..<150 {
+            if editor.masks.contains(where: { $0.kind == "depthRange" }) { break }
+            await wait(0.1)
+        }
         if editor.masks.contains(where: { $0.kind == "depthRange" }) {
             editor.begin("Gamma profondità")
             for i in 0..<10 {
@@ -400,12 +403,14 @@ final class AppModel: ObservableObject {
             editor.undo()
             await wait(0.3)
         }
-        // all the way back: the photo as it came in
-        for _ in 0..<200 where editor.canUndo {
+        // all the way back: the photo as it came in (each undo once the last one is done)
+        for _ in 0..<200 {
+            for _ in 0..<50 where editor.busy { await wait(0.05) }
+            if !editor.canUndo { break }
             editor.undo()
-            await wait(0.05)
+            await wait(0.02)
         }
-        await wait(1)
+        for _ in 0..<100 where editor.busy { await wait(0.1) }
         log("undo to the start ok (\(editor.cursor) of \(editor.history.count), first step \(editor.history.first ?? "?"))")
         for _ in 0..<3 {
             editor.redo()

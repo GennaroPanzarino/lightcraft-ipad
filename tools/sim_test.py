@@ -99,10 +99,16 @@ shot("06_after_exports")
 
 # every heavy path in a row: the app must get to the end without crashing
 launch("-screen", "workspace", "-tool", "exposure", "-stress", "YES")
-time.sleep(95)
+# as long as the run takes on this machine (CI runners differ several times in speed), up to 6 minutes
+for _ in range(72):
+    time.sleep(5)
+    tail = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "1m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
+    if "lightcraft stress: done" in tail:
+        break
+time.sleep(2)
 shot("08_after_stress")
 
-log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "12m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
+log = sh("xcrun", "simctl", "spawn", udid, "log", "show", "--last", "20m", "--style", "compact", "--predicate", 'process == "LightCraftTether"', check=False).stdout
 open(os.path.join(OUT, "app.log"), "w").write(log)
 crashes = sh("bash", "-c", "ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -i lightcraft || true").stdout
 print("crash reports:", crashes or "none")
