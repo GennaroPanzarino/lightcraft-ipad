@@ -868,7 +868,7 @@ final class EditorModel: ObservableObject {
         guard photo != 0 else { return }
         let p = photo
         Task {
-            let ok = (try? await engine.batch { e in
+            let ok = (try? await engine.batch { e -> Void in
                 _ = try e.execNow("library.select", ["ids": [p], "active": p])
                 _ = try e.execNow("develop.copy", ["groups": groups])
             }) != nil

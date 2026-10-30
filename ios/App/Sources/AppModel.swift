@@ -903,7 +903,7 @@ final class AppModel: ObservableObject {
         guard !ids.isEmpty else { return }
         Task {
             await library.editLock.lock()
-            let ok = (try? await engine.batch { e in
+            let ok = (try? await engine.batch { e -> Void in
                 _ = try e.execNow("library.select", ["ids": [src] + ids, "active": src])
                 _ = try e.execNow("develop.sync", ["groups": groups])
             }) != nil
