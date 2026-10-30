@@ -459,8 +459,9 @@ final class Bokeh {
     private let composite: MTLComputePipelineState
     private let compositeHalf: MTLComputePipelineState
     private let lock = NSLock()
-    /// The picture on the GPU: the sharp one, and its half-size pyramid in linear light.
-    private var picture: (id: ObjectIdentifier, sharp: MTLTexture, half: MTLTexture)?
+    /// The picture on the GPU: the sharp one, and its half-size pyramid in linear light. (The
+    /// picture itself is held: a freed picture's address can come back with another one.)
+    private var picture: (image: CGImage, sharp: MTLTexture, half: MTLTexture)?
     private var depthTex: (id: Int, tex: MTLTexture)?
     private var refineTex: (id: Int, tex: MTLTexture)?
     private var noRefine: MTLTexture?
@@ -538,8 +539,7 @@ final class Bokeh {
     /// The picture on the GPU with its pyramid: made once for a picture, kept while it is the one
     /// blurred (an export's is not kept).
     private func upload(_ image: CGImage, keep: Bool) -> (sharp: MTLTexture, half: MTLTexture)? {
-        let id = ObjectIdentifier(image)
-        if keep, let p = picture, p.id == id { return (p.sharp, p.half) }
+        if keep, let p = picture, p.image === image { return (p.sharp, p.half) }
         let w = image.width, h = image.height
         var pixels = [UInt8](repeating: 0, count: w * h * 4)
         guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
@@ -562,7 +562,7 @@ final class Bokeh {
         }
         cmd.commit()
         cmd.waitUntilCompleted()
-        if keep { picture = (id, sharp, half) }
+        if keep { picture = (image, sharp, half) }
         return (sharp, half)
     }
 

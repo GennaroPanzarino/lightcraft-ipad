@@ -1,3 +1,4 @@
+import ImageIO
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -45,6 +46,31 @@ enum Importer {
             if extensions.contains(f.pathExtension.lowercased()) { out.append(f) }
         }
         return out.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+    }
+
+    /// The formats LightCraft's engine doesn't open quickly: the iPad's and iPhone's HEIC (and HEIF),
+    /// decoded by the iPad's own hardware into a file it does.
+    static let converted: Set<String> = ["heic", "heif", "hif"]
+
+    /// A photo the engine can't open quickly made into one it can, in place: 8 bits a channel (a
+    /// phone's photo) into a JPEG at 98 %, deeper ones (a camera's 10-bit HEIF) into a 16-bit PNG;
+    /// the colour profile, the capture data (EXIF, GPS) and the orientation kept. The original copy
+    /// goes. Anything else (or a failure) is left as it is.
+    static func convertIfNeeded(_ url: URL) -> URL {
+        guard converted.contains(url.pathExtension.lowercased()),
+              let src = CGImageSourceCreateWithURL(url as CFURL, nil), CGImageSourceGetCount(src) > 0,
+              var props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any] else { return url }
+        let deep = ((props[kCGImagePropertyDepth] as? NSNumber)?.intValue ?? 8) > 8
+        let out = destination(for: url.deletingPathExtension().lastPathComponent + (deep ? ".png" : ".jpg"))
+        guard let dest = CGImageDestinationCreateWithURL(out as CFURL, (deep ? UTType.png : UTType.jpeg).identifier as CFString, 1, nil) else { return url }
+        props[kCGImageDestinationLossyCompressionQuality] = 0.98
+        CGImageDestinationAddImageFromSource(dest, src, 0, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
+            try? FileManager.default.removeItem(at: out)
+            return url
+        }
+        try? FileManager.default.removeItem(at: url)
+        return out
     }
 
     /// `src` copied to `dst`, through a file coordinator (a file of iCloud Drive comes down first).
@@ -115,7 +141,9 @@ extension AppModel {
         var done = 0, bad = failed
         importing = (0, max(1, copies.count))
         var first: String?
-        for u in copies {
+        for c in copies {
+            // a HEIC made into a JPEG first (the iPad decodes it in an instant, the engine wouldn't)
+            let u = await Task.detached(priority: .userInitiated) { Importer.convertIfNeeded(c) }.value
             if let k = await library.importPhoto(u) {
                 first = first ?? k
                 done += 1
@@ -160,8 +188,9 @@ struct PhotoPicker: UIViewControllerRepresentable {
         let done: ([NSItemProvider]) -> Void
         init(_ done: @escaping ([NSItemProvider]) -> Void) { self.done = done }
 
+        /// (the sheet showing the picker closes it: dismissing it here would leave the sheet's
+        /// state open, and the picker could not come back)
         func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-            picker.dismiss(animated: true)
             done(results.map(\.itemProvider))
         }
     }
@@ -198,8 +227,11 @@ struct ImportMenu: View {
             }
         }
         .sheet(isPresented: $photos) {
-            PhotoPicker { model.importItems($0) }
-                .ignoresSafeArea()
+            PhotoPicker { providers in
+                photos = false
+                model.importItems(providers)
+            }
+            .ignoresSafeArea()
         }
         .fileImporter(isPresented: $files, allowedContentTypes: [.image, .rawImage, .folder], allowsMultipleSelection: true) { r in
             if case .success(let urls) = r { model.importFiles(urls) }

@@ -253,6 +253,20 @@ final class AppModel: ObservableObject {
         editor.commitLensBlur()
         await wait(2)
         log("lens blur ok (\(editor.depthSource))")
+        // zoomed in, the window is as blurred as the whole photo: it must differ from the same
+        // window undeveloped by the lens blur
+        var zoomedIn: CGImage?
+        renderDetail(window: CGRect(x: 0.05, y: 0.05, width: 0.3, height: 0.3), full: CGSize(width: 5000, height: 3333)) { img, _ in zoomedIn = img }
+        for _ in 0..<100 {
+            if zoomedIn != nil { break }
+            await wait(0.1)
+        }
+        if let z = zoomedIn, let k = current, let p = library.shot(k)?.photo,
+           let plain = try? await engine.renderRegion(p, fullW: 5000, fullH: 3333, x: 250, y: 166, w: 1500, h: 1000).0.image {
+            log("zoom keeps the blur: difference \(String(format: "%.1f", AppModel.difference(z, plain)))")
+        } else {
+            log("zoom keeps the blur: none")
+        }
         // Lightroom's bokeh, its glow, a box of focus, a Refine stroke each way
         for shape in ["bubble", "blade5", "ring", "cateye"] {
             var l = editor.lensBlur
@@ -408,6 +422,24 @@ final class AppModel: ObservableObject {
         editor.reset()
         await wait(2)
         log("done")
+    }
+
+    /// Tests: how far apart two pictures are (mean difference of their 64 × 64 thumbnails, 0…255).
+    nonisolated static func difference(_ a: CGImage, _ b: CGImage) -> Double {
+        func small(_ i: CGImage) -> [UInt8] {
+            var px = [UInt8](repeating: 0, count: 64 * 64 * 4)
+            px.withUnsafeMutableBytes { buf in
+                guard let ctx = CGContext(data: buf.baseAddress, width: 64, height: 64, bitsPerComponent: 8, bytesPerRow: 256,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return }
+                ctx.interpolationQuality = .medium
+                ctx.draw(i, in: CGRect(x: 0, y: 0, width: 64, height: 64))
+            }
+            return px
+        }
+        let x = small(a), y = small(b)
+        var sum = 0.0
+        for i in 0..<x.count where i % 4 != 3 { sum += abs(Double(x[i]) - Double(y[i])) }
+        return sum / Double(64 * 64 * 3)
     }
 
     /// Tests (`-testTool crop|radial|brush|spots`): a cursor tool on, for the screenshots.
@@ -844,24 +876,49 @@ final class AppModel: ObservableObject {
         guard !ids.isEmpty else { return }
         Task {
             await library.editLock.lock()
-            _ = try? await engine.exec("preset.apply", ["id": id, "amount": 100, "ids": ids])
+            let ok = (try? await engine.exec("preset.apply", ["id": id, "amount": 100, "ids": ids])) != nil
             await library.editLock.unlock()
-            for k in keys { library.edited(k) }
-            if let c = current, keys.contains(c) { editor.open(c) }
+            await changed(keys)
+            if !ok { say("Stile non applicato") }
         }
     }
 
-    /// The copied adjustments onto the browser's selection.
+    /// The copied adjustments onto the library's selection.
     func paste(to keys: Set<String>) {
         let ids = library.shots.filter { keys.contains($0.key) && $0.photo != 0 }.map(\.photo)
         guard !ids.isEmpty else { return }
         Task {
             await library.editLock.lock()
-            _ = try? await engine.exec("develop.paste", ["ids": ids])
+            let ok = (try? await engine.exec("develop.paste", ["ids": ids])) != nil
             await library.editLock.unlock()
-            for k in keys { library.edited(k) }
-            say(ids.count == 1 ? "Regolazioni applicate" : "Regolazioni applicate a \(ids.count) foto")
+            await changed(keys)
+            say(!ok ? "Incolla non riuscito" : (ids.count == 1 ? "Regolazioni incollate" : "Regolazioni incollate su \(ids.count) foto"))
         }
+    }
+
+    /// Lightroom's Sync: the settings of `groups` of the photo on screen onto the selection.
+    func sync(to keys: Set<String>, groups: [String]) {
+        guard let src = current.flatMap({ library.shot($0) })?.photo, src != 0 else { return }
+        let ids = library.shots.filter { keys.contains($0.key) && $0.photo != 0 && $0.photo != src }.map(\.photo)
+        guard !ids.isEmpty else { return }
+        Task {
+            await library.editLock.lock()
+            let ok = (try? await engine.batch { e in
+                _ = try e.execNow("library.select", ["ids": [src] + ids, "active": src])
+                _ = try e.execNow("develop.sync", ["groups": groups])
+            }) != nil
+            await library.editLock.unlock()
+            await changed(keys)
+            say(!ok ? "Sincronizzazione non riuscita" : "Regolazioni sincronizzate su \(ids.count) foto")
+        }
+    }
+
+    /// Photos whose settings changed outside the editor: their thumbnails made again, the editor
+    /// reloaded when it shows one of them.
+    private func changed(_ keys: Set<String>) async {
+        for k in keys { library.edited(k) }
+        if let c = current, keys.contains(c) { editor.reload() }
+        for k in library.shots.map(\.key) where keys.contains(k) { await library.thumb(k) }
     }
 
     // ---- export, delete

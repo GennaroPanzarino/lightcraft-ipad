@@ -310,9 +310,16 @@ final class EditorModel: ObservableObject {
     /// A zoomed-in window (`n`, 0…1 of the picture) with the lens blur, when it is on.
     func blurDetail(_ image: CGImage, window n: CGRect, full: CGSize) async -> CGImage? {
         let state = liveBlur ?? lensBlur
-        guard state.enabled, let sc = scene(state, aspect: full.width / max(full.height, 1)) else { return nil }
+        guard state.enabled else { return nil }
+        guard let sc = scene(state, aspect: full.width / max(full.height, 1)) else {
+            NSLog("lightcraft lensblur: zoomed window without blur (no depth yet)")
+            return nil
+        }
         let ref = max(full.width, full.height)
-        return await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, scene: sc, state, window: n, reference: ref) }.value
+        let t0 = Date()
+        let out = await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, scene: sc, state, window: n, reference: ref) }.value
+        NSLog("lightcraft lensblur: zoomed window \(image.width)x\(image.height) \(out == nil ? "not blurred" : "blurred") in \(Int(Date().timeIntervalSince(t0) * 1000)) ms")
+        return out
     }
 
     /// The lens blur into the photo's settings (one undo step). The engine does not draw it, so
@@ -855,15 +862,28 @@ final class EditorModel: ObservableObject {
         run("develop.wbPick", ["x": Double(q.x), "y": Double(q.y)])
     }
 
-    func copySettings() {
+    /// The photo's settings of `groups` copied (Lightroom's Copy Settings), for a paste on this
+    /// photo or others.
+    func copySettings(groups: [String]) {
         guard photo != 0 else { return }
         let p = photo
         Task {
-            _ = try? await engine.batch { e in
+            let ok = (try? await engine.batch { e in
                 _ = try e.execNow("library.select", ["ids": [p], "active": p])
-                _ = try e.execNow("develop.copy")
-            }
-            hasCopy = true
+                _ = try e.execNow("develop.copy", ["groups": groups])
+            }) != nil
+            hasCopy = hasCopy || ok
+            onNotice?(ok ? "Regolazioni copiate (\(groups.count) \(groups.count == 1 ? "gruppo" : "gruppi"))" : "Copia non riuscita")
+        }
+    }
+
+    /// The photo's settings read again after they changed from elsewhere (a paste or a style on a
+    /// selection in the library): the panel, the picture, the history.
+    func reload() {
+        guard photo != 0 else { return }
+        Task {
+            await refresh()
+            await after(nil)
         }
     }
 

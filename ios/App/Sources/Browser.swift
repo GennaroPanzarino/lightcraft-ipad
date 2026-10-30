@@ -385,9 +385,11 @@ private struct SelectionBar: View {
     @ObservedObject var library: Library
     @Binding var exportOpen: Bool
     @Binding var confirmDelete: Bool
+    @State private var syncing = false
 
     var body: some View {
         let sel = library.shots.filter { model.selection.contains($0.key) }
+        let source = model.current.flatMap { library.shot($0) }
         let rating = Set(sel.map(\.rating)).count == 1 ? (sel.first?.rating ?? 0) : 0
         let tag: ColorTag? = Set(sel.map { $0.label?.rawValue ?? "" }).count == 1 ? sel.first?.label : nil
         HStack(spacing: 10) {
@@ -414,7 +416,7 @@ private struct SelectionBar: View {
                     .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
             Button { model.paste(to: model.selection) } label: {
-                Label("Applica regolazioni", systemImage: "doc.on.clipboard").font(Typo.labelStrong)
+                Label("Incolla", systemImage: "doc.on.clipboard").font(Typo.labelStrong)
                     .foregroundColor(model.editor.hasCopy ? Lc.text : Lc.text3)
                     .padding(.horizontal, 10).frame(height: 30)
                     .background(Lc.raised)
@@ -422,6 +424,22 @@ private struct SelectionBar: View {
             }
             .buttonStyle(PressStyle())
             .disabled(!model.editor.hasCopy)
+            // Lightroom's Sync: the photo on screen's settings onto the others selected
+            Button { syncing = true } label: {
+                Label("Sincronizza…", systemImage: "arrow.triangle.2.circlepath").font(Typo.labelStrong)
+                    .foregroundColor(source?.photo ?? 0 != 0 ? Lc.text : Lc.text3)
+                    .padding(.horizontal, 10).frame(height: 30)
+                    .background(Lc.raised)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            }
+            .buttonStyle(PressStyle())
+            .disabled(source?.photo ?? 0 == 0 || sel.filter { $0.key != source?.key }.isEmpty)
+            .sheet(isPresented: $syncing) {
+                CopySettingsSheet(title: "Sincronizza", action: "Sincronizza",
+                                  note: "Le regolazioni spuntate di «\(source?.name ?? "")» (la foto aperta) vanno sulle altre \(sel.filter { $0.key != source?.key }.count) selezionate.") { groups in
+                    model.sync(to: model.selection, groups: groups)
+                }
+            }
             Button { exportOpen = true } label: {
                 Label("Esporta", systemImage: "square.and.arrow.up").font(Typo.labelStrong).foregroundColor(.black)
                     .padding(.horizontal, 12).frame(height: 30)

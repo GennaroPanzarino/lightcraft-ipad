@@ -35,9 +35,16 @@ enum ToolGroup: String, CaseIterable, Identifiable {
 }
 
 /// Which tools are folded, and the group in view.
+/// The group in view (its icon lit in the strip). Apart from the folds: the column scrolling
+/// changes it every few frames, and only the strip may redraw then.
+@MainActor
+final class StripState: ObservableObject {
+    @Published var active: ToolGroup = .exposure
+}
+
+/// Which tools are folded.
 @MainActor
 final class PanelState: ObservableObject {
-    @Published var active: ToolGroup = .exposure
     @Published var collapsed: Set<String> {
         didSet { UserDefaults.standard.set(Array(collapsed), forKey: "collapsedTools") }
     }
@@ -64,11 +71,13 @@ struct ToolPanel: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ed: EditorModel
     @StateObject private var state = PanelState()
+    /// (held, not observed: the column doesn't redraw as the group in view changes)
+    @State private var strip = StripState()
     @State private var target: ToolGroup?
 
     var body: some View {
         VStack(spacing: 0) {
-            GroupStrip(state: state) { target = $0 }
+            GroupStrip(strip: strip) { target = $0 }
             HistogramBox(ed: ed)
                 .frame(height: 70)
                 .padding(.horizontal, 10)
@@ -81,7 +90,9 @@ struct ToolPanel: View {
             Rectangle().fill(Lc.line).frame(height: 1)
             ScrollViewReader { proxy in
                 ScrollView(showsIndicators: true) {
-                    LazyVStack(alignment: .leading, spacing: 0) {
+                    // every tool made at once: a lazy column guessed the heights of the tools above
+                    // as it scrolled back up, and kept moving the content under the finger
+                    VStack(alignment: .leading, spacing: 0) {
                         ForEach(ToolGroup.allCases) { g in
                             // (where the group starts: the strip above scrolls here, and lights up its icon)
                             GroupAnchor(group: g).id(g)
@@ -95,11 +106,11 @@ struct ToolPanel: View {
                 .coordinateSpace(name: "tools")
                 .onPreferenceChange(GroupTops.self) { tops in
                     let shown = tops.filter { $0.value <= 30 }.max { $0.value < $1.value }?.key
-                    if let s = shown, let g = ToolGroup(rawValue: s), g != state.active { state.active = g }
+                    if let s = shown, let g = ToolGroup(rawValue: s), g != strip.active { strip.active = g }
                 }
                 .onChange(of: target) { t in
                     guard let t = t else { return }
-                    state.active = t
+                    strip.active = t
                     withAnimation(Motion.panel) { proxy.scrollTo(t, anchor: .top) }
                     target = nil
                 }
@@ -181,7 +192,7 @@ struct ToolPanel: View {
         case .retouch:
             ToolBox(id: "spots", title: "Rimozione macchie", state: state) { SpotTool(ed: ed) }
         case .adjustments:
-            ToolBox(id: "styles", title: "Stili e preset", state: state) { StylesTool(ed: ed) }
+            ToolBox(id: "styles", title: "Stili e preset", state: state) { StylesTool(ed: ed, strip: strip) }
             ToolBox(id: "history", title: "Cronologia", state: state) { HistoryTool(ed: ed) }
         case .metadata:
             ToolBox(id: "info", title: "Valutazione e informazioni", state: state) {
@@ -238,7 +249,7 @@ func vignetteName(_ v: String) -> String {
 
 /// The group icons above the column: tap one to go to its tools.
 private struct GroupStrip: View {
-    @ObservedObject var state: PanelState
+    @ObservedObject var strip: StripState
     let onPick: (ToolGroup) -> Void
 
     @EnvironmentObject var model: AppModel
@@ -251,9 +262,9 @@ private struct GroupStrip: View {
                     VStack(spacing: 0) {
                         Image(systemName: g.icon)
                             .font(.system(size: 17))
-                            .foregroundColor(g == state.active ? Lc.text : Lc.text3)
+                            .foregroundColor(g == strip.active ? Lc.text : Lc.text3)
                             .frame(maxWidth: .infinity, minHeight: 40)
-                        Rectangle().fill(g == state.active ? Lc.accent : Color.clear).frame(height: 2)
+                        Rectangle().fill(g == strip.active ? Lc.accent : Color.clear).frame(height: 2)
                     }
                     .contentShape(Rectangle())
                 }
@@ -610,18 +621,19 @@ private struct CurveTool: View {
             if parametric {
                 Sliders(store: ed.store, ids: ["curve.highlights", "curve.lights", "curve.darks", "curve.shadows", "curve.splitShadows", "curve.splitMid", "curve.splitHighlights", "curve.refineSaturation"])
             } else {
-                HStack(spacing: 4) {
+                // Lightroom's channels: grey (all of them), red, green, blue
+                HStack(spacing: 6) {
                     ForEach(Channel.allCases) { c in
                         Button { ch = c } label: {
-                            Text(c.label).font(Typo.labelStrong)
-                                .foregroundColor(c == ch ? Lc.text : Lc.text3)
-                                .frame(maxWidth: .infinity, minHeight: 24)
-                                .background(c == ch ? Lc.pressed : Lc.field)
-                                .overlay(Rectangle().fill(Color(c.ui)).frame(height: 2), alignment: .bottom)
-                                .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
+                            Circle().fill(c == .master ? Color(hex: 0x9A9AA0) : Color(c.ui))
+                                .frame(width: 20, height: 20)
+                                .overlay(Circle().stroke(Color.white, lineWidth: 2).padding(-4).opacity(c == ch ? 1 : 0))
+                                .frame(width: 40, height: 36)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                     }
+                    Spacer()
                 }
                 CurveBox(ed: ed, ch: ch, version: ed.curvesVersion)
                     .aspectRatio(1, contentMode: .fit)
@@ -1428,17 +1440,20 @@ private struct SpotTool: View {
 private struct StylesTool: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var ed: EditorModel
+    /// The thumbnails of the styles are made when the styles come into view (each is a render).
+    @ObservedObject var strip: StripState
     @State private var open: Set<String> = ["User Presets", "Imported Presets"]
     @State private var importing = false
     @State private var creating = false
     @State private var deleting: Preset?
+    @State private var copying = false
 
     var body: some View {
         let groups = presetGroups(model.presets)
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                FlatButton(title: "Copia", icon: "doc.on.doc") { ed.copySettings(); model.say("Regolazioni copiate") }
-                FlatButton(title: "Applica", icon: "doc.on.clipboard", enabled: ed.hasCopy) { ed.pasteSettings() }
+                FlatButton(title: "Copia…", icon: "doc.on.doc") { copying = true }
+                FlatButton(title: "Incolla", icon: "doc.on.clipboard", enabled: ed.hasCopy) { ed.pasteSettings() }
                 FlatButton(title: "Auto", icon: "wand.and.stars") { ed.run("develop.auto") }
             }
             .padding(.top, 2)
@@ -1470,6 +1485,7 @@ private struct StylesTool: View {
                 let isOpen = open.contains(g)
                 Button {
                     if isOpen { open.remove(g) } else { open.insert(g) }
+                    loadVariants()
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "chevron.right").font(.system(size: 8, weight: .bold)).foregroundColor(Lc.text3)
@@ -1491,13 +1507,25 @@ private struct StylesTool: View {
                                     Button(role: .destructive) { deleting = p } label: { Label("Elimina", systemImage: "trash") }
                                 }
                             }
-                            .onAppear { ed.loadVariants(model.presets.filter { open.contains($0.group) }.map(\.id)) }
+
                     }
                 }
             }
         }
         .padding(.bottom, 4)
+        .onAppear { if strip.active == .adjustments { loadVariants() } }
+        .onChange(of: strip.active) { a in if a == .adjustments { loadVariants() } }
+        .onChange(of: ed.key) { _ in
+            // a new photo: its thumbnails once its settings are in (they empty the old ones)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { if strip.active == .adjustments { loadVariants() } }
+        }
         .sheet(isPresented: $creating) { NewStyleSheet(ed: ed).environmentObject(model) }
+        .sheet(isPresented: $copying) {
+            CopySettingsSheet(title: "Copia regolazioni", action: "Copia",
+                              note: "Le regolazioni spuntate si incollano su questa foto o su altre: nella libreria seleziona le foto e tocca Incolla.") { groups in
+                ed.copySettings(groups: groups)
+            }
+        }
         .fileImporter(isPresented: $importing, allowedContentTypes: [.item, .folder], allowsMultipleSelection: true) { r in
             if case .success(let urls) = r { model.importPresets(urls) }
         }
@@ -1507,6 +1535,13 @@ private struct StylesTool: View {
         } message: {
             Text("Lo stile sparisce da questo iPad; le foto a cui l'hai applicato restano come sono.")
         }
+    }
+}
+
+extension StylesTool {
+    /// The open groups' style thumbnails for the photo on screen.
+    fileprivate func loadVariants() {
+        ed.loadVariants(model.presets.filter { open.contains($0.group) }.map(\.id))
     }
 }
 
