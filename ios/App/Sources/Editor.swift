@@ -133,7 +133,11 @@ final class EditorModel: ObservableObject {
     @Published var refineSize = 0.04
     @Published var refineFeather = 50.0
     @Published var refineFlow = 100.0
-    private var mapCache: (key: String, map: DepthMap)?
+    /// Changes with the depth (the GPU keeps its copy until then).
+    private var depthID = 0
+    private var refineCache: (key: String, mask: RefineMask?)?
+    private var depthViewBusy = false
+    private var depthViewPending = false
     private var liveBlur: LensBlurState?
     private var depth: DepthMap?
     private var depthKey = ""
@@ -234,7 +238,7 @@ final class EditorModel: ObservableObject {
         depthImage = nil
         depthHistogram = []
         subjectDepth = nil
-        mapCache = nil
+        refineCache = nil
         clean = nil
         liveBlur = nil
         showDepth = false
@@ -288,24 +292,27 @@ final class EditorModel: ObservableObject {
         }
     }
 
-    /// The blur map of the picture on screen for `state` (made again only when the depth, the
-    /// settings or the crop changed).
-    private func blurMap(_ state: LensBlurState, aspect: CGFloat) -> DepthMap? {
+    /// What the blur of the picture on screen is made from: the depth, and the Refine strokes
+    /// (drawn again only when they or the crop change).
+    private func scene(_ state: LensBlurState, aspect: CGFloat) -> BlurScene? {
         guard let d = depth else { return nil }
-        let k = "\(depthKey)|\(state.focus ?? -1)|\(state.range)|\(state.refine.count)|\(state.refine.last?.points.count ?? 0)|\(crop.rect)|\(crop.angle)|\(aspect)"
-        if let m = mapCache, m.key == k { return m.map }
-        let m = LensBlurRenderer.blurMap(d, state, crop: crop, aspect: aspect)
-        mapCache = (k, m)
-        return m
+        let k = "\(state.refine.count)|\(state.refine.last?.points.count ?? 0)|\(crop.rect)|\(crop.angle)|\(aspect)"
+        let mask: RefineMask?
+        if let c = refineCache, c.key == k {
+            mask = c.mask
+        } else {
+            mask = LensBlurRenderer.refineMask(state.refine, crop: crop, aspect: aspect)
+            refineCache = (k, mask)
+        }
+        return BlurScene(depth: d, depthID: depthID, refine: mask)
     }
 
     /// A zoomed-in window (`n`, 0…1 of the picture) with the lens blur, when it is on.
     func blurDetail(_ image: CGImage, window n: CGRect, full: CGSize) async -> CGImage? {
         let state = liveBlur ?? lensBlur
-        guard state.enabled, let map = blurMap(state, aspect: full.width / max(full.height, 1)) else { return nil }
-        let part = map.sub(n)
+        guard state.enabled, let sc = scene(state, aspect: full.width / max(full.height, 1)) else { return nil }
         let ref = max(full.width, full.height)
-        return await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, map: part, state, reference: ref) }.value
+        return await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(image, scene: sc, state, window: n, reference: ref) }.value
     }
 
     /// The lens blur into the photo's settings (one undo step). The engine does not draw it, so
@@ -364,18 +371,31 @@ final class EditorModel: ObservableObject {
         commitLensBlur()
     }
 
-    /// Visualize Depth: the depth in colour, the focal band lighter.
+    /// Visualize Depth: the depth in colour, the focal band lighter (one picture at a time: a
+    /// finger moving the band asks for many, the latest is made).
     private func refreshDepthView() {
         guard showDepth, let d = depth, let p = clean else {
             if !showDepth { depthImage = nil }
             return
         }
+        if depthViewBusy {
+            depthViewPending = true
+            return
+        }
+        depthViewBusy = true
         let s = liveBlur ?? lensBlur
         let f = Float(s.focus ?? Double(d.subject)), r = Float(s.range)
-        let w = max(1, p.image.width / 2), h = max(1, p.image.height / 2)
+        // a quarter of the pixels while a finger moves
+        let k = liveBlur != nil ? 4 : 2
+        let w = max(1, p.image.width / k), h = max(1, p.image.height / k)
         Task {
             let img = await Task.detached(priority: .userInitiated) { d.colored(width: w, height: h, focus: f, range: r) }.value
             if showDepth { depthImage = img }
+            depthViewBusy = false
+            if depthViewPending {
+                depthViewPending = false
+                refreshDepthView()
+            }
         }
     }
 
@@ -399,6 +419,7 @@ final class EditorModel: ObservableObject {
                 if p.key == key {
                     depth = d
                     depthKey = k
+                    depthID += 1
                     depthSource = DepthEstimator.shared.source
                     depthHistogram = d?.histogram(64) ?? []
                     subjectDepth = d.map { Double($0.subject) }
@@ -408,10 +429,10 @@ final class EditorModel: ObservableObject {
             }
             var out = p
             let aspect = CGFloat(p.image.width) / CGFloat(max(1, p.image.height))
-            if state.enabled, let map = blurMap(state, aspect: aspect) {
+            if state.enabled, let sc = scene(state, aspect: aspect) {
                 let img = p.image
                 let t1 = Date()
-                if let b = await Task.detached(priority: .userInitiated, operation: { LensBlurRenderer.apply(img, map: map, state, scale: light ? 0.5 : 1, quality: light ? .live : .screen) }).value {
+                if let b = await Task.detached(priority: .userInitiated, operation: { LensBlurRenderer.apply(img, scene: sc, state, half: light, quality: light ? .live : .screen) }).value {
                     out = Pic(key: p.key, photo: p.photo, revision: p.revision, boxW: p.boxW, boxH: p.boxH, image: b, draft: p.draft || light)
                 }
                 NSLog("lightcraft lensblur: blur \(Int(Date().timeIntervalSince(t1) * 1000)) ms\(light ? " (light)" : "") \(Bokeh.shared == nil ? "CI" : "Metal")")
@@ -750,10 +771,10 @@ final class EditorModel: ObservableObject {
     }
 
     private func applyState(_ d: [String: Any]) {
-        crop = CropState.from(d, aspect: imageAspect)
-        if liveBlur == nil { lensBlur = LensBlurState.from(d) }
-        masks = MaskInfo.list(d)
-        spots = SpotInfo.list(d)
+        update(\.crop, CropState.from(d, aspect: imageAspect))
+        if liveBlur == nil { update(\.lensBlur, LensBlurState.from(d)) }
+        update(\.masks, MaskInfo.list(d))
+        update(\.spots, SpotInfo.list(d))
         if selectNewest {
             selectNewest = false
             // the newest has the highest id (a duplicate sits right after its original)
@@ -1227,31 +1248,33 @@ final class EditorModel: ObservableObject {
         store.load(Controls.values(controls))
         var cs: [Channel: CurvePoints] = [:]
         for ch in Channel.allCases { cs[ch] = curvePoints(d, ch) }
-        curves = cs
-        curvesVersion += 1
-        bw = (d["treatment"] as? String) == "bw"
-        wbMode = (d["wb"] as? [String: Any])?.str("mode") ?? "asShot"
-        profile = (d["profile"] as? [String: Any])?.str("id") ?? ""
+        if cs != curves {
+            curves = cs
+            curvesVersion += 1
+        }
+        update(\.bw, (d["treatment"] as? String) == "bw")
+        update(\.wbMode, (d["wb"] as? [String: Any])?.str("mode") ?? "asShot")
+        update(\.profile, (d["profile"] as? [String: Any])?.str("id") ?? "")
         let optics = d["optics"] as? [String: Any] ?? [:]
-        lensProfile = (optics["lens_profile"] as? Bool) ?? false
-        removeCA = (optics["remove_ca"] as? Bool) ?? false
-        upright = (d["geometry"] as? [String: Any])?.str("upright") ?? "off"
-        constrainCrop = ((d["geometry"] as? [String: Any])?["constrain_crop"] as? Bool) ?? false
-        vignetteStyle = (d["vignette"] as? [String: Any])?.str("style") ?? "highlightPriority"
+        update(\.lensProfile, (optics["lens_profile"] as? Bool) ?? false)
+        update(\.removeCA, (optics["remove_ca"] as? Bool) ?? false)
+        update(\.upright, (d["geometry"] as? [String: Any])?.str("upright") ?? "off")
+        update(\.constrainCrop, ((d["geometry"] as? [String: Any])?["constrain_crop"] as? Bool) ?? false)
+        update(\.vignetteStyle, (d["vignette"] as? [String: Any])?.str("style") ?? "highlightPriority")
         let aspect = (d["crop"] as? [String: Any])?["aspect"]
         if let a = aspect as? String {
-            cropAspect = a
+            update(\.cropAspect, a)
         } else if let wh = aspect as? [Any], wh.count == 2 {
             // a locked shape (500 × 400): its lowest terms (5 × 4)
             var a = Int(double(wh[0])), b = Int(double(wh[1]))
             var x = a, y = b
             while y != 0 { (x, y) = (y, x % y) }
             if x > 0 { a /= x; b /= x }
-            cropAspect = "\(a)x\(b)"
+            update(\.cropAspect, "\(a)x\(b)")
         } else {
-            cropAspect = ""
+            update(\.cropAspect, "")
         }
-        disabled = Set((d["disabled_sections"] as? [Any] ?? []).compactMap { $0 as? String })
+        update(\.disabled, Set((d["disabled_sections"] as? [Any] ?? []).compactMap { $0 as? String }))
         applyState(d)
         if !keepVariants {
             variantsTask?.cancel()
@@ -1269,10 +1292,16 @@ final class EditorModel: ObservableObject {
         }
         let n = list.count
         let c = Int(int64(h["cursor"] ?? NSNumber(value: n - 1)))
-        history = list
-        cursor = c
-        canUndo = c > 0
-        canRedo = c < n - 1
+        update(\.history, list)
+        update(\.cursor, c)
+        update(\.canUndo, c > 0)
+        update(\.canRedo, c < n - 1)
+    }
+
+    /// A published value set only when it changes: every set redraws the whole tool column, and a
+    /// switch or a slider animating meanwhile would stutter.
+    private func update<T: Equatable>(_ kp: ReferenceWritableKeyPath<EditorModel, T>, _ v: T) {
+        if self[keyPath: kp] != v { self[keyPath: kp] = v }
     }
 
     /// The EXIF a photographer reads (camera, lens, exposure), from the file.

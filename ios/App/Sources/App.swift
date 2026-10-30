@@ -42,7 +42,7 @@ struct RootView: View {
                         .allowsHitTesting(model.screen == .browser && model.hero == nil)
                 }
                 if model.screen == .connect {
-                    ConnectView(initial: model.settings.login, canGoBack: model.settings.login.complete)
+                    ConnectView(initial: model.settings.login, canGoBack: true)
                         .transition(.opacity)
                         .zIndex(3)
                 } else if !model.ready {

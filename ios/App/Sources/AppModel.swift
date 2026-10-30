@@ -67,6 +67,8 @@ final class AppModel: ObservableObject {
     @Published private(set) var presets: [Preset] = []
     @Published private(set) var profiles: [Profile] = []
     @Published var export: ExportState?
+    /// Photos being brought in (from Photos, Files, a drop): how many are in, of how many.
+    @Published var importing: (done: Int, total: Int)?
     @Published var note: String?
     @Published var toolsShown = true
     /// The workspace's toolbar and tools (a tap on the photo hides and shows them).
@@ -108,7 +110,8 @@ final class AppModel: ObservableObject {
         previews = Engine(dir: previewsDir.appendingPathComponent("library"), previews: true, maxEdge: 2560)
         shotsDir = docs.appendingPathComponent("shots")
         settings = s
-        screen = s.login.complete ? .browser : .connect
+        // the library, camera or not: the camera joins in when asked (the status in the corner)
+        screen = .browser
         library = Library(engine: engine, previews: previews)
         loupe = Loupe(engine: engine)
         editor = EditorModel(engine: engine, loupe: loupe, library: library)
@@ -461,6 +464,20 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             editor.cursorTool = .refine
             editor.showDepth = true
+        case "import":
+            // Files' way in: a copy of a shot imported as a new photo, under a name of its own
+            let before = library.shots.count
+            if let s = library.shots.first(where: { $0.photo != 0 }), let src = try? FileManager.default.contentsOfDirectory(at: shotsDir, includingPropertiesForKeys: nil).first(where: { stem($0.lastPathComponent) == s.key }) {
+                let tmp = FileManager.default.temporaryDirectory.appendingPathComponent(src.lastPathComponent)
+                try? FileManager.default.removeItem(at: tmp)
+                try? FileManager.default.copyItem(at: src, to: tmp)
+                importFiles([tmp])
+                for _ in 0..<200 {
+                    if library.shots.count > before && importing == nil { break }
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+            NSLog("lightcraft editor: import \(library.shots.count - before) photo, \(library.shots.last?.key ?? "")")
         case "cropdone":
             // in and out of the crop tool: the photo must be back on screen
             editor.enterCrop()
@@ -646,6 +663,7 @@ final class AppModel: ObservableObject {
         let task = UIApplication.shared.beginBackgroundTask(withName: "lightcraft-trim")
         loupe.paused = true
         loupe.trim()
+        Bokeh.shared?.forget()
         _ = try? await engine.exec("app.memoryBudget", ["mb": 64])
         _ = try? await previews.exec("app.memoryBudget", ["mb": 48])
         NSLog("lightcraft: background, \(os_proc_available_memory() / 1_048_576) MB free")
@@ -919,8 +937,8 @@ final class AppModel: ObservableObject {
         // the Refine strokes are in the image's own coordinates: the crop takes them to the picture's
         let aspect = (try? await engine.renderUncropped(photo, 128, 128, draft: true)).map { CGFloat($0.image.width) / CGFloat(max(1, $0.image.height)) } ?? 1.5
         let crop = CropState.from(d, aspect: aspect)
-        let map = LensBlurRenderer.blurMap(depth, s, crop: crop, aspect: CGFloat(small.width) / CGFloat(max(1, small.height)))
-        _ = await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(toFile: url, map: map, s, quality: quality) }.value
+        let scene = BlurScene(depth: depth, depthID: -Int(photo), refine: LensBlurRenderer.refineMask(s.refine, crop: crop, aspect: CGFloat(small.width) / CGFloat(max(1, small.height))))
+        _ = await Task.detached(priority: .userInitiated) { LensBlurRenderer.apply(toFile: url, scene: scene, s, quality: quality) }.value
     }
 
     /// A file into the Photos library (off the main actor: Photos runs the change block on its own

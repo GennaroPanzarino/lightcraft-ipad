@@ -187,13 +187,35 @@ final class Library: ObservableObject {
         }
     }
 
-    private func importWhole(_ key: String, _ url: URL) async {
+    /// A photo from Photos, Files or a drop (already copied into the app): into the library as it
+    /// is (no next-capture style), under its own name. Its key, nil when LightCraft can't read it.
+    func importPhoto(_ copy: URL) async -> String? {
+        var url = copy
+        // a name a shot has already (a camera's DSC… brought in again from Files): the copy is renamed
+        if taken(stem(url.lastPathComponent)) {
+            let free = Importer.destination(for: url.lastPathComponent) { self.taken($0) }
+            if (try? FileManager.default.moveItem(at: url, to: free)) != nil { url = free }
+        }
+        let key = stem(url.lastPathComponent)
+        if shot(key) == nil { shots.append(Shot(key: key, name: url.lastPathComponent, captured: ISO8601DateFormatter().string(from: Date()))) }
+        await importWhole(key, url, styled: false)
+        if shot(key)?.photo ?? 0 != 0 { return key }
+        shots.removeAll { $0.key == key && $0.photo == 0 }
+        return nil
+    }
+
+    /// Whether a name (without extension) is taken by a shot.
+    func taken(_ key: String) -> Bool { shot(key) != nil }
+
+    private func importWhole(_ key: String, _ url: URL, styled: Bool = true) async {
         await editLock.lock()
         do {
             // the shot before it (for "copy from the last capture")
             let previous = shots.last { $0.key != key && $0.photo != 0 }?.photo
             let id = try await importFile(url, into: engine)
-            if settings().copyLast {
+            if !styled {
+                // a photo brought in keeps its own look
+            } else if settings().copyLast {
                 if let prev = previous {
                     _ = try? await engine.batch { e in
                         _ = try e.execNow("library.select", ["ids": [prev], "active": prev])

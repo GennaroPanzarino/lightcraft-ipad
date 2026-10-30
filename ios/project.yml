@@ -27,8 +27,8 @@ targets:
       path: App/Info.plist
       properties:
         CFBundleDisplayName: LightCraft
-        CFBundleShortVersionString: "2.6"
-        CFBundleVersion: "9"
+        CFBundleShortVersionString: "2.7"
+        CFBundleVersion: "10"
         UILaunchScreen: {}
         UIApplicationSupportsIndirectInputEvents: true
         UIRequiresFullScreen: false

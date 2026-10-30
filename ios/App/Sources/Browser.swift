@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// Capture One's browser: the session's shots as tiles fitted together in rows (each photo whole,
 /// in its own proportions; every row as wide as the screen; hairline gaps), each with its name,
@@ -17,6 +18,7 @@ struct BrowserView: View {
     @State private var pinchFrom: CGFloat?
     @State private var exportOpen = false
     @State private var confirmDelete = false
+    @State private var dropping = false
 
     private var list: [Shot] {
         var l = library.shots.filter { $0.stage != .failed }
@@ -46,8 +48,12 @@ struct BrowserView: View {
                 if shots.isEmpty {
                     VStack(spacing: 10) {
                         Image(systemName: "photo.on.rectangle").font(.system(size: 34)).foregroundColor(Lc.text3)
-                        Text(library.shots.isEmpty ? "Nessuno scatto ancora" : "Nessuna foto con questi filtri").font(Typo.title).foregroundColor(Lc.text)
-                        Text(library.shots.isEmpty ? "Le foto della sessione compaiono qui." : "Cambia i filtri in alto.").font(Typo.body).foregroundColor(Lc.text2)
+                        Text(library.shots.isEmpty ? "La libreria è vuota" : "Nessuna foto con questi filtri").font(Typo.title).foregroundColor(Lc.text)
+                        Text(library.shots.isEmpty ? "Importa le foto da Foto o da File, trascinale qui da un'altra app, o collega la fotocamera dallo stato in alto a destra." : "Cambia i filtri in alto.")
+                            .font(Typo.body).foregroundColor(Lc.text2).multilineTextAlignment(.center).frame(maxWidth: 440)
+                        if library.shots.isEmpty {
+                            ImportMenu(big: true).padding(.top, 12)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else {
@@ -100,6 +106,12 @@ struct BrowserView: View {
                 }
             }
             .ignoresSafeArea(edges: .bottom)
+            // photos dropped from another app (Photos, Files, Safari…) come in
+            .onDrop(of: [UTType.image, UTType.rawImage], isTargeted: $dropping) { providers in
+                model.importItems(providers)
+                return true
+            }
+            .overlay(dropping ? RoundedRectangle(cornerRadius: 8, style: .continuous).stroke(Lc.accent, lineWidth: 3).padding(6).allowsHitTesting(false) : nil)
         }
         .background(Lc.window.ignoresSafeArea())
         .onAppear { cell = CGFloat(model.settings.gridSize) }
@@ -178,6 +190,15 @@ struct BrowserView: View {
                 Button("Valutazione") { sort = "rating" }
             }
             Rectangle().fill(Lc.hairline2).frame(width: 1, height: 22).padding(.horizontal, 4)
+            if let i = model.importing {
+                HStack(spacing: 6) {
+                    ProgressView().progressViewStyle(.circular).scaleEffect(0.7).frame(width: 16, height: 16)
+                    Text("Importo \(min(i.done + 1, i.total)) di \(i.total)").font(Typo.label).foregroundColor(Lc.text2)
+                }
+                .padding(.horizontal, 8)
+            } else {
+                ImportMenu()
+            }
             barButton(multi ? "Fine" : "Seleziona", accent: multi) {
                 withAnimation(Motion.quick) {
                     multi.toggle()

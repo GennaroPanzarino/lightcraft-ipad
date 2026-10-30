@@ -4,11 +4,10 @@ import UniformTypeIdentifiers
 
 /// Capture One's tool tabs, here as the groups of one long scrolling column.
 enum ToolGroup: String, CaseIterable, Identifiable {
-    case capture, exposure, color, composition, local, details, lens, retouch, adjustments, metadata
+    case exposure, color, composition, local, details, lens, retouch, adjustments, metadata
     var id: String { rawValue }
     var title: String {
         switch self {
-        case .capture: return "Tethering"
         case .exposure: return "Base"
         case .color: return "Colore"
         case .composition: return "Composizione"
@@ -22,7 +21,6 @@ enum ToolGroup: String, CaseIterable, Identifiable {
     }
     var icon: String {
         switch self {
-        case .capture: return "camera"
         case .exposure: return "sun.max"
         case .color: return "paintpalette"
         case .composition: return "crop"
@@ -39,7 +37,7 @@ enum ToolGroup: String, CaseIterable, Identifiable {
 /// Which tools are folded, and the group in view.
 @MainActor
 final class PanelState: ObservableObject {
-    @Published var active: ToolGroup = .capture
+    @Published var active: ToolGroup = .exposure
     @Published var collapsed: Set<String> {
         didSet { UserDefaults.standard.set(Array(collapsed), forKey: "collapsedTools") }
     }
@@ -85,10 +83,11 @@ struct ToolPanel: View {
                 ScrollView(showsIndicators: true) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(ToolGroup.allCases) { g in
-                            GroupHeader(group: g).id(g)
+                            // (where the group starts: the strip above scrolls here, and lights up its icon)
+                            GroupAnchor(group: g).id(g)
                             tools(g)
-                                .disabled(ed.photo == 0 && g != .capture)
-                                .opacity(ed.photo == 0 && g != .capture ? 0.45 : 1)
+                                .disabled(ed.photo == 0)
+                                .opacity(ed.photo == 0 ? 0.45 : 1)
                         }
                         Color.clear.frame(height: 240)
                     }
@@ -118,13 +117,6 @@ struct ToolPanel: View {
     private func tools(_ g: ToolGroup) -> some View {
         let s = ed.store
         switch g {
-        case .capture:
-            ToolBox(id: "tethering", title: "Tethering", state: state) {
-                CameraTool(tether: model.tether)
-                Rectangle().fill(Lc.hairline).frame(height: 0.5).padding(.vertical, 6)
-                Text("PROSSIMO SCATTO").overline().padding(.bottom, 2)
-                NextCaptureTool()
-            }
         case .exposure:
             ToolBox(id: "basic", title: "Base", state: state, ed: ed, resetIds: basicIds, accessory: AnyView(MiniButton(title: "Auto") { ed.run("develop.auto") })) {
                 BasicTool(ed: ed)
@@ -249,6 +241,9 @@ private struct GroupStrip: View {
     @ObservedObject var state: PanelState
     let onPick: (ToolGroup) -> Void
 
+    @EnvironmentObject var model: AppModel
+    @State private var nextCapture = false
+
     var body: some View {
         HStack(spacing: 0) {
             ForEach(ToolGroup.allCases) { g in
@@ -264,6 +259,29 @@ private struct GroupStrip: View {
                 }
                 .buttonStyle(.plain)
             }
+            // the next capture (tethering): a small menu of its own
+            Button { nextCapture = true } label: {
+                VStack(spacing: 0) {
+                    Image(systemName: "camera")
+                        .font(.system(size: 17))
+                        .foregroundColor(nextCapture ? Lc.accent : Lc.text3)
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                    Rectangle().fill(Color.clear).frame(height: 2)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .popover(isPresented: $nextCapture, arrowEdge: .top) {
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("PROSSIMO SCATTO").overline().padding(.bottom, 6)
+                    NextCaptureTool()
+                }
+                .padding(16)
+                .frame(width: 340)
+                .background(Lc.panel)
+                .environmentObject(model)
+                .preferredColorScheme(.dark)
+            }
         }
         .frame(height: 42)
         .background(Lc.header)
@@ -271,23 +289,16 @@ private struct GroupStrip: View {
     }
 }
 
-/// A group's title (Capture One's tool tab), above its tools.
-private struct GroupHeader: View {
+/// Where a group's tools start (no title of its own: each tool has one), for the strip above.
+private struct GroupAnchor: View {
     let group: ToolGroup
 
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: group.icon).font(.system(size: 11)).foregroundColor(Lc.text3)
-            Text(group.title.uppercased()).overline()
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 42)
-        .background(Lc.window)
-        .overlay(Rectangle().fill(Lc.line).frame(height: 1), alignment: .bottom)
-        .background(GeometryReader { g in
-            Color.clear.preference(key: GroupTops.self, value: [group.rawValue: g.frame(in: .named("tools")).minY])
-        })
+        Color.clear
+            .frame(height: 0)
+            .background(GeometryReader { g in
+                Color.clear.preference(key: GroupTops.self, value: [group.rawValue: g.frame(in: .named("tools")).minY])
+            })
     }
 }
 
@@ -325,7 +336,7 @@ struct ToolBox<Content: View>: View {
         let folded = state.collapsed.contains(id)
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 6) {
-                Button { withAnimation(Motion.quick) { state.toggle(id) } } label: {
+                Button { withAnimation(.easeOut(duration: 0.16)) { state.toggle(id) } } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "chevron.right")
                             .font(.system(size: 9, weight: .bold))
@@ -351,6 +362,7 @@ struct ToolBox<Content: View>: View {
                 VStack(alignment: .leading, spacing: 0) { content }
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
+                    .transition(.opacity)
             }
             Rectangle().fill(Lc.line).frame(height: 1)
         }
@@ -457,35 +469,6 @@ struct ValueSlider: UIViewRepresentable {
 
 // MARK: - Capture
 
-private struct CameraTool: View {
-    @EnvironmentObject var model: AppModel
-    @ObservedObject var tether: TetherLink
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                LinkStatus(tether: tether, raw: model.settings.raw)
-                Spacer()
-            }
-            if case .blocked(let m) = tether.link {
-                Text(m).font(Typo.caption).foregroundColor(Lc.warn).fixedSize(horizontal: false, vertical: true)
-            } else if let w = tether.warning {
-                Text(w).font(Typo.caption).foregroundColor(Lc.warn).fixedSize(horizontal: false, vertical: true)
-            }
-            Segment(options: ["RAW", "JPEG rapido"], selected: model.settings.raw ? 0 : 1) { model.setRaw($0 == 0) }
-            HStack(spacing: 6) {
-                if tether.link.busy {
-                    FlatButton(title: "Scollega", icon: "bolt.slash") { model.disconnect() }
-                } else {
-                    FlatButton(title: "Collega", icon: "bolt") { model.connect() }
-                }
-                FlatButton(title: "Accesso…", icon: "key") { model.go(.connect) }
-            }
-        }
-        .padding(.vertical, 4)
-    }
-}
-
 private struct NextCaptureTool: View {
     @EnvironmentObject var model: AppModel
 
@@ -556,6 +539,8 @@ private struct GeometryTool: View {
                 FlatButton(title: "Azzera ritaglio", icon: "arrow.counterclockwise") { ed.run("crop.reset") }
             }
             .padding(.vertical, 4)
+            // the crop stays inside the photo however the lens and perspective corrections bend it
+            ToggleRow(label: "Vincola ritaglio", on: ed.constrainCrop) { ed.setConstrainCrop($0) }
             SubHeader(title: "Ruota e capovolgi")
             HStack(spacing: 6) {
                 LabeledIcon(icon: "rotate.left", label: "Sinistra") { ed.run("photo.rotateLeft", ["ids": [ed.photo]]) }
@@ -960,17 +945,24 @@ private struct BokehIcon: View {
 }
 
 /// Lightroom's focal range: how much of the scene lies at each distance (near on the left), on the
-/// depth's colours; the band in focus is a box to drag, or to stretch from either side.
+/// depth's colours; the band in focus is a box to drag, stretched or narrowed by the grips on its
+/// sides. The box follows the finger by itself (nothing else redraws), and the photo with it.
 private struct FocalRange: View {
     @ObservedObject var ed: EditorModel
+    /// The band while a finger moves it (distance 0…1, near → far).
+    @State private var live: (lo: Double, hi: Double)?
     @State private var grab: (what: Int, lo: Double, hi: Double, x: CGFloat)?
+    /// How wide a grip is, and how far from it a finger still takes it.
+    private let grip: CGFloat = 14
+    private let reach: CGFloat = 24
 
     var body: some View {
         GeometryReader { g in
             let s = ed.lensBlur
             let w = g.size.width, h = g.size.height
             let centre = 1 - (s.focus ?? ed.subjectDepth ?? 0.85)
-            let lo = max(0, centre - s.range / 2), hi = min(1, centre + s.range / 2)
+            let lo = live?.lo ?? max(0, centre - s.range / 2), hi = live?.hi ?? min(1, centre + s.range / 2)
+            let x0 = CGFloat(lo) * w, x1 = CGFloat(hi) * w
             ZStack(alignment: .topLeading) {
                 LinearGradient(colors: [Color(hex: 0xFFDB59), Color(hex: 0xD9526E), Color(hex: 0x5C29A0), Color(hex: 0x1A0D52)], startPoint: .leading, endPoint: .trailing)
                     .opacity(0.55)
@@ -988,28 +980,36 @@ private struct FocalRange: View {
                     p.closeSubpath()
                 }
                 .fill(Color.white.opacity(0.32))
+                // the band, and its grips
                 Rectangle()
-                    .fill(Color.white.opacity(0.14))
+                    .fill(Color.white.opacity(0.16))
                     .overlay(Rectangle().stroke(Color.white, lineWidth: 1.5))
-                    .frame(width: max(4, CGFloat(hi - lo) * w), height: h)
-                    .offset(x: CGFloat(lo) * w)
-                Text("Vicino").font(Typo.micro).foregroundColor(Lc.text).padding(4)
-                Text("Lontano").font(Typo.micro).foregroundColor(Lc.text).padding(4).frame(maxWidth: .infinity, alignment: .trailing)
+                    .frame(width: max(2, x1 - x0), height: h)
+                    .offset(x: x0)
+                Grip().frame(width: grip, height: h).offset(x: x0 - grip / 2)
+                Grip().frame(width: grip, height: h).offset(x: x1 - grip / 2)
+                Text("Vicino").font(Typo.micro).foregroundColor(Lc.text).padding(4).offset(y: h - 20).allowsHitTesting(false)
+                Text("Lontano").font(Typo.micro).foregroundColor(Lc.text).padding(4).frame(maxWidth: .infinity, alignment: .trailing).offset(y: h - 20)
+                    .allowsHitTesting(false)
             }
             .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .contentShape(Rectangle())
-            .gesture(
+            .highPriorityGesture(
                 DragGesture(minimumDistance: 0)
                     .onChanged { v in
                         if grab == nil {
-                            let x0 = CGFloat(lo) * w, x1 = CGFloat(hi) * w
-                            let what = abs(v.startLocation.x - x0) < 16 ? 0 : (abs(v.startLocation.x - x1) < 16 ? 1 : 2)
-                            grab = (what, lo, hi, v.startLocation.x)
-                            // a touch outside the box: the box moves there
+                            // a grip (the nearer one when both are close), else the band; a touch
+                            // outside the band brings it there
+                            let d0 = abs(v.startLocation.x - x0), d1 = abs(v.startLocation.x - x1)
+                            let what = min(d0, d1) <= reach ? (d0 <= d1 ? 0 : 1) : 2
+                            var a = lo, b = hi
                             if what == 2 && (v.startLocation.x < x0 || v.startLocation.x > x1) {
                                 let half = (hi - lo) / 2, m = Double(v.startLocation.x / w)
-                                grab = (2, max(0, m - half), min(1, m + half), v.startLocation.x)
+                                a = max(0, min(1 - 2 * half, m - half))
+                                b = a + 2 * half
                             }
+                            grab = (what, a, b, v.startLocation.x)
+                            Haptics.tick()
                         }
                         guard let gr = grab else { return }
                         let d = Double((v.location.x - gr.x) / w)
@@ -1022,6 +1022,7 @@ private struct FocalRange: View {
                             a = max(0, min(1 - span, gr.lo + d))
                             b = a + span
                         }
+                        live = (a, b)
                         var n = ed.lensBlur
                         n.focus = 1 - (a + b) / 2
                         n.range = b - a
@@ -1031,8 +1032,24 @@ private struct FocalRange: View {
                     .onEnded { _ in
                         grab = nil
                         ed.commitLensBlur()
+                        live = nil
                     }
             )
+        }
+    }
+}
+
+/// A grip on a side of the focal band: a bar with two notches.
+private struct Grip: View {
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 3, style: .continuous).fill(Color.white)
+                .frame(width: 8)
+                .padding(.vertical, 8)
+                .shadow(color: .black.opacity(0.45), radius: 2)
+            VStack(spacing: 3) {
+                ForEach(0..<2) { _ in Rectangle().fill(Color.black.opacity(0.45)).frame(width: 4, height: 1) }
+            }
         }
     }
 }

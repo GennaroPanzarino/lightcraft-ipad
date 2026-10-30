@@ -85,17 +85,27 @@ struct Segment: View {
 }
 
 /// A switch on a row, the label on the left.
+/// A switch on a row. It moves the moment it is touched (what it switches catches up after: an
+/// engine round trip never holds the switch back or makes it jump), and the work starts once the
+/// switch has begun to move.
 struct ToggleRow: View {
     let label: String
     let on: Bool
     var enabled = true
     let onChange: (Bool) -> Void
+    /// The position shown until the model has the new one.
+    @State private var pending: Bool?
 
     var body: some View {
         HStack {
             Text(label).font(Typo.label).foregroundColor(Lc.text2)
             Spacer()
-            Toggle("", isOn: Binding(get: { on }, set: { onChange($0) }))
+            Toggle("", isOn: Binding(get: { pending ?? on }, set: { v in
+                pending = v
+                DispatchQueue.main.async { onChange(v) }
+                // (if the model never takes it, the switch shows what is true again)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2) { if pending == v { pending = nil } }
+            }))
                 .labelsHidden()
                 .toggleStyle(SwitchToggleStyle(tint: Lc.accent))
                 .scaleEffect(0.8, anchor: .trailing)
@@ -103,6 +113,7 @@ struct ToggleRow: View {
         .frame(height: 34)
         .disabled(!enabled)
         .opacity(enabled ? 1 : 0.4)
+        .onChange(of: on) { v in if pending == v { pending = nil } }
     }
 }
 

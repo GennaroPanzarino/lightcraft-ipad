@@ -273,40 +273,51 @@ final class DepthEstimator: @unchecked Sendable {
     }
 }
 
-/// The blur itself: how much each part of the picture melts (its blur map: depth against the
-/// focal band, then the Refine strokes), and a lens's bokeh drawn on the GPU from it.
+/// The Refine strokes drawn over the picture, two channels a cell (blur, focus), 0…255.
+struct RefineMask {
+    let width: Int
+    let height: Int
+    let bytes: [UInt8]
+    /// Changes with the strokes (the GPU keeps its copy until then).
+    let id: Int
+
+    func at(_ x: Double, _ y: Double) -> (blur: Float, focus: Float) {
+        let i = (max(0, min(height - 1, Int(y * Double(height)))) * width + max(0, min(width - 1, Int(x * Double(width))))) * 2
+        return (Float(bytes[i]) / 255, Float(bytes[i + 1]) / 255)
+    }
+}
+
+/// What a lens blur is made from: the scene's depth (and an id that changes with it) and the
+/// Refine strokes.
+struct BlurScene {
+    let depth: DepthMap
+    let depthID: Int
+    let refine: RefineMask?
+}
+
+/// The blur itself: how much each part of the picture melts (its blur map: the depth against the
+/// focal band, then the Refine strokes, worked out on the GPU for every frame), and a lens's
+/// bokeh drawn on the GPU from it.
 enum LensBlurRenderer {
     static let context = CIContext(options: [.cacheIntermediates: false])
-    /// The blur map's long edge (cells).
-    static let mapEdge = 1024
+    /// The Refine strokes' raster, long edge (cells).
+    static let refineEdge = 1024
+    private static var refineIDs = 0
 
-    /// How much each part of a picture of proportions `aspect` (width / height) blurs, 0…1: the
-    /// depth away from the focal band, then the Refine strokes (`crop` takes them from the
-    /// image's own coordinates to the picture's).
-    static func blurMap(_ d: DepthMap, _ s: LensBlurState, crop: CropState, aspect: CGFloat) -> DepthMap {
-        let w = aspect >= 1 ? mapEdge : max(8, Int(CGFloat(mapEdge) * aspect))
-        let h = aspect >= 1 ? max(8, Int(CGFloat(mapEdge) / aspect)) : mapEdge
-        let focus = Float(s.focus ?? Double(d.subject))
-        let half = Float(s.range) / 2
-        let soft: Float = 0.1
-        var v = [Float](repeating: 0, count: w * h)
-        for y in 0..<h {
-            let fy = (Double(y) + 0.5) / Double(h)
-            for x in 0..<w {
-                let dv = d.sample((Double(x) + 0.5) / Double(w), fy)
-                v[y * w + x] = max(0, min(1, (abs(dv - focus) - half) / soft))
-            }
+    /// The Refine strokes over a picture of proportions `aspect` (width / height): `crop` takes
+    /// them from the image's own coordinates to the picture's.
+    static func refineMask(_ list: [RefineStroke], crop: CropState, aspect: CGFloat) -> RefineMask? {
+        guard !list.isEmpty else { return nil }
+        let w = aspect >= 1 ? refineEdge : max(8, Int(CGFloat(refineEdge) * aspect))
+        let h = aspect >= 1 ? max(8, Int(CGFloat(refineEdge) / aspect)) : refineEdge
+        let blur = strokes(list.filter { !$0.focus }, crop: crop, w, h), keep = strokes(list.filter(\.focus), crop: crop, w, h)
+        var bytes = [UInt8](repeating: 0, count: w * h * 2)
+        for i in 0..<(w * h) {
+            bytes[i * 2] = UInt8(max(0, min(255, (blur?[i] ?? 0) * 255)))
+            bytes[i * 2 + 1] = UInt8(max(0, min(255, (keep?[i] ?? 0) * 255)))
         }
-        if !s.refine.isEmpty {
-            let blur = strokes(s.refine.filter { !$0.focus }, crop: crop, w, h), keep = strokes(s.refine.filter(\.focus), crop: crop, w, h)
-            for i in v.indices {
-                var m = v[i]
-                if let b = blur { m = max(m, b[i]) }
-                if let k = keep { m *= 1 - k[i] }
-                v[i] = m
-            }
-        }
-        return DepthMap(width: w, height: h, values: v)
+        refineIDs += 1
+        return RefineMask(width: w, height: h, bytes: bytes, id: refineIDs)
     }
 
     /// Refine strokes drawn at `w × h` over the picture (0…1 each cell; nil: none), each softened
@@ -353,32 +364,46 @@ enum LensBlurRenderer {
         return out
     }
 
-    /// A picture of the viewer with the blur; `scale` < 1 makes a smaller one (while a finger
-    /// moves). `reference`: the long edge of the whole photo at this scale (a window of a
-    /// zoomed-in view blurs as much as the whole photo would).
-    static func apply(_ image: CGImage, map: DepthMap, _ s: LensBlurState, reference: CGFloat? = nil, scale: CGFloat = 1, quality: Bokeh.Quality = .screen) -> CGImage? {
+    /// A picture of the viewer with the blur. `window`: the part of the whole picture it shows (a
+    /// zoomed-in view), `reference` the whole picture's long edge at this scale; `half`: a picture
+    /// of half the size (while a finger moves).
+    static func apply(_ image: CGImage, scene: BlurScene, _ s: LensBlurState, window: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1),
+                      reference: CGFloat? = nil, half: Bool = false, quality: Bokeh.Quality = .screen) -> CGImage? {
         guard s.enabled, s.amount > 0 else { return nil }
-        var ref = reference ?? CGFloat(max(image.width, image.height))
-        var input = image
-        if scale < 1 {
-            input = scaled(image, edge: Int(CGFloat(max(image.width, image.height)) * scale))
-            ref *= scale
+        let ref = reference ?? CGFloat(max(image.width, image.height))
+        let focus = Float(s.focus ?? Double(scene.depth.subject))
+        if let out = Bokeh.shared?.render(image, scene: scene, window: window, focus: focus, range: Float(s.range), radius: s.radius(ref),
+                                          shape: s.bokeh, boost: s.boost / 100, half: half, quality: quality) {
+            return out
         }
-        let radius = s.radius(ref)
-        if let out = Bokeh.shared?.render(input, map: map, radius: radius, shape: s.bokeh, boost: s.boost / 100, quality: quality) { return out }
-        return fallback(input, map: map, radius: radius)
+        return fallback(image, map: cpuMap(scene, focus: focus, range: Float(s.range), window: window), radius: s.radius(ref))
     }
 
     /// An exported JPEG or TIFF blurred in place, its metadata kept.
-    static func apply(toFile url: URL, map: DepthMap, _ s: LensBlurState, quality: Int) -> Bool {
+    static func apply(toFile url: URL, scene: BlurScene, _ s: LensBlurState, quality: Int) -> Bool {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil), let image = CGImageSourceCreateImageAtIndex(src, 0, nil),
               let type = CGImageSourceGetType(src) else { return false }
         let props = (CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]) ?? [:]
-        guard let cg = apply(image, map: map, s, quality: .export), let dest = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else { return false }
+        guard let cg = apply(image, scene: scene, s, quality: .export), let dest = CGImageDestinationCreateWithURL(url as CFURL, type, 1, nil) else { return false }
         var p = props
         p[kCGImageDestinationLossyCompressionQuality] = Double(quality) / 100
         CGImageDestinationAddImage(dest, cg, p as CFDictionary)
         return CGImageDestinationFinalize(dest)
+    }
+
+    /// The blur map on the CPU (without Metal): the depth against the focal band, the strokes.
+    private static func cpuMap(_ scene: BlurScene, focus: Float, range: Float, window n: CGRect) -> DepthMap {
+        let w = 512, h = max(8, Int(512 * n.height / max(n.width, 0.001)))
+        var v = [Float](repeating: 0, count: w * h)
+        for y in 0..<h {
+            for x in 0..<w {
+                let px = Double(n.minX) + (Double(x) + 0.5) / Double(w) * Double(n.width), py = Double(n.minY) + (Double(y) + 0.5) / Double(h) * Double(n.height)
+                var b = max(0, min(1, (abs(scene.depth.sample(px, py) - focus) - range / 2) / 0.1))
+                if let r = scene.refine?.at(px, py) { b = max(b, r.blur) * (1 - r.focus) }
+                v[y * w + x] = b
+            }
+        }
+        return DepthMap(width: w, height: h, values: v)
     }
 
     /// Without Metal: Core Image's disc blur at two strengths, blended by the map.
@@ -414,9 +439,13 @@ enum LensBlurRenderer {
 
 /// A lens's bokeh on the GPU (Metal): every pixel gathers the light of the pixels around it within
 /// its own blur radius, through the aperture's shape, the bright ones weighing more (Boost); a
-/// pixel only takes from those whose own blur reaches it, so a sharp subject never smears into
-/// the blur behind it. Worked on a pyramid of the picture (the blur at a size where its radius is
-/// a handful of pixels), then laid over the sharp picture where the map says, edge-aware.
+/// pixel only takes from those whose own blur reaches it, so a sharp subject never smears into the
+/// blur behind it. Worked on a pyramid of the picture (the blur at a size where its radius is a
+/// handful of pixels), then laid over the sharp picture where the map says, edge-aware.
+///
+/// Real time: the picture, its pyramid, the depth and the strokes stay on the GPU between frames
+/// (a slider or the focal range moving changes only numbers), so a frame is the map, the gather
+/// and the composite, a few milliseconds.
 final class Bokeh {
     enum Quality { case live, screen, export }
 
@@ -425,22 +454,29 @@ final class Bokeh {
     private let device: MTLDevice
     private let queue: MTLCommandQueue
     private let prepare: MTLComputePipelineState
+    private let mapk: MTLComputePipelineState
     private let gather: MTLComputePipelineState
     private let composite: MTLComputePipelineState
+    private let compositeHalf: MTLComputePipelineState
     private let lock = NSLock()
+    /// The picture on the GPU: the sharp one, and its half-size pyramid in linear light.
+    private var picture: (id: ObjectIdentifier, sharp: MTLTexture, half: MTLTexture)?
+    private var depthTex: (id: Int, tex: MTLTexture)?
+    private var refineTex: (id: Int, tex: MTLTexture)?
+    private var noRefine: MTLTexture?
 
     private init?() {
         guard let d = MTLCreateSystemDefaultDevice(), let q = d.makeCommandQueue(),
-              let lib = try? d.makeLibrary(source: Bokeh.source, options: nil),
-              let a = lib.makeFunction(name: "prepare").flatMap({ try? d.makeComputePipelineState(function: $0) }),
-              let b = lib.makeFunction(name: "gather").flatMap({ try? d.makeComputePipelineState(function: $0) }),
-              let c = lib.makeFunction(name: "composite").flatMap({ try? d.makeComputePipelineState(function: $0) })
-        else { return nil }
+              let lib = try? d.makeLibrary(source: Bokeh.source, options: nil) else { return nil }
+        func pipe(_ name: String) -> MTLComputePipelineState? { lib.makeFunction(name: name).flatMap { try? d.makeComputePipelineState(function: $0) } }
+        guard let a = pipe("prepare"), let m = pipe("mapk"), let b = pipe("gather"), let c = pipe("composite"), let h = pipe("compositeHalf") else { return nil }
         device = d
         queue = q
         prepare = a
+        mapk = m
         gather = b
         composite = c
+        compositeHalf = h
     }
 
     /// The aperture's shape as sample points (x, y in the unit disc) with weights.
@@ -474,19 +510,25 @@ final class Bokeh {
         return out
     }
 
-    private func texture(_ format: MTLPixelFormat, _ w: Int, _ h: Int, mips: Bool = false, write: Bool = true) -> MTLTexture? {
-        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: w, height: h, mipmapped: mips)
-        d.usage = write ? [.shaderRead, .shaderWrite] : [.shaderRead]
+    private func texture(_ format: MTLPixelFormat, _ w: Int, _ h: Int, mips: Bool = false) -> MTLTexture? {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: format, width: max(1, w), height: max(1, h), mipmapped: mips)
+        d.usage = [.shaderRead, .shaderWrite]
         d.storageMode = .shared
         return device.makeTexture(descriptor: d)
     }
 
-    func render(_ image: CGImage, map: DepthMap, radius: Double, shape: String, boost: Double, quality: Quality) -> CGImage? {
-        lock.lock()
-        defer { lock.unlock() }
+    private func dispatch(_ e: MTLComputeCommandEncoder, _ p: MTLComputePipelineState, _ gw: Int, _ gh: Int) {
+        e.setComputePipelineState(p)
+        let tw = p.threadExecutionWidth, th = max(1, p.maxTotalThreadsPerThreadgroup / tw)
+        e.dispatchThreadgroups(MTLSize(width: (gw + tw - 1) / tw, height: (gh + th - 1) / th, depth: 1), threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
+    }
+
+    /// The picture on the GPU with its pyramid: made once for a picture, kept while it is the one
+    /// blurred (an export's is not kept).
+    private func upload(_ image: CGImage, keep: Bool) -> (sharp: MTLTexture, half: MTLTexture)? {
+        let id = ObjectIdentifier(image)
+        if keep, let p = picture, p.id == id { return (p.sharp, p.half) }
         let w = image.width, h = image.height
-        guard w > 1, h > 1, radius > 0.5 else { return nil }
-        // the picture, as RGBA8 sRGB
         var pixels = [UInt8](repeating: 0, count: w * h * 4)
         guard let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
         let drawn = pixels.withUnsafeMutableBytes { buf -> Bool in
@@ -495,67 +537,109 @@ final class Bokeh {
             ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
             return true
         }
-        guard drawn else { return nil }
-        guard let sharp = texture(.rgba8Unorm, w, h, write: false), let out = texture(.rgba8Unorm, w, h) else { return nil }
+        guard drawn, let sharp = texture(.rgba8Unorm, w, h), let half = texture(.rgba16Float, max(1, w / 2), max(1, h / 2), mips: true),
+              let cmd = queue.makeCommandBuffer(), let e = cmd.makeComputeCommandEncoder() else { return nil }
         sharp.replace(region: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0, withBytes: pixels, bytesPerRow: w * 4)
-        // the blur map
-        // (8 bits: filtered on every GPU, unlike 32-bit floats)
-        guard let mapTex = texture(.r8Unorm, map.width, map.height, write: false) else { return nil }
-        let bytes = map.values.map { UInt8(max(0, min(255, ($0 * 255).rounded()))) }
-        mapTex.replace(region: MTLRegionMake2D(0, 0, map.width, map.height), mipmapLevel: 0, withBytes: bytes, bytesPerRow: map.width)
-        // linear light at half size, with its pyramid
-        let hw = max(1, w / 2), hh = max(1, h / 2)
-        guard let half = texture(.rgba16Float, hw, hh, mips: true) else { return nil }
-        // the level where the strongest blur is a few pixels across, and the work at that size
-        let target: Double = quality == .export ? 22 : (quality == .live ? 10 : 16)
-        let level = max(0, min(half.mipmapLevelCount - 1, Int(ceil(log2(max(1, radius / 2 / target))))))
-        let lw = max(1, hw >> level), lh = max(1, hh >> level)
-        guard let blurred = texture(.rgba16Float, lw, lh) else { return nil }
-        let count = quality == .export ? 160 : (quality == .live ? 56 : 112)
-        var taps = Bokeh.taps(shape, count: count)
-        var params = Params(radius: Float(radius / 2) / Float(1 << level), fullRadius: Float(radius), boost: Float(boost), count: Int32(taps.count),
-                            catEye: shape == "cateye" ? 1 : 0, level: Float(level))
-        guard let cmd = queue.makeCommandBuffer(), let e1 = cmd.makeComputeCommandEncoder() else { return nil }
-        func dispatch(_ e: MTLComputeCommandEncoder, _ p: MTLComputePipelineState, _ gw: Int, _ gh: Int) {
-            e.setComputePipelineState(p)
-            let tw = p.threadExecutionWidth, th = max(1, p.maxTotalThreadsPerThreadgroup / tw)
-            e.dispatchThreadgroups(MTLSize(width: (gw + tw - 1) / tw, height: (gh + th - 1) / th, depth: 1), threadsPerThreadgroup: MTLSize(width: tw, height: th, depth: 1))
-        }
-        e1.setTexture(sharp, index: 0)
-        e1.setTexture(half, index: 1)
-        dispatch(e1, prepare, hw, hh)
-        e1.endEncoding()
+        e.setTexture(sharp, index: 0)
+        e.setTexture(half, index: 1)
+        dispatch(e, prepare, half.width, half.height)
+        e.endEncoding()
         if half.mipmapLevelCount > 1, let b = cmd.makeBlitCommandEncoder() {
             b.generateMipmaps(for: half)
             b.endEncoding()
         }
+        cmd.commit()
+        cmd.waitUntilCompleted()
+        if keep { picture = (id, sharp, half) }
+        return (sharp, half)
+    }
+
+    private func depth(_ scene: BlurScene) -> MTLTexture? {
+        if let d = depthTex, d.id == scene.depthID { return d.tex }
+        let m = scene.depth
+        guard let t = texture(.r32Float, m.width, m.height) else { return nil }
+        m.values.withUnsafeBytes { t.replace(region: MTLRegionMake2D(0, 0, m.width, m.height), mipmapLevel: 0, withBytes: $0.baseAddress!, bytesPerRow: m.width * 4) }
+        depthTex = (scene.depthID, t)
+        return t
+    }
+
+    private func refine(_ r: RefineMask?) -> MTLTexture? {
+        guard let r = r else {
+            if noRefine == nil { noRefine = texture(.rg8Unorm, 1, 1) }
+            return noRefine
+        }
+        if let t = refineTex, t.id == r.id { return t.tex }
+        guard let t = texture(.rg8Unorm, r.width, r.height) else { return nil }
+        t.replace(region: MTLRegionMake2D(0, 0, r.width, r.height), mipmapLevel: 0, withBytes: r.bytes, bytesPerRow: r.width * 2)
+        refineTex = (r.id, t)
+        return t
+    }
+
+    func render(_ image: CGImage, scene: BlurScene, window: CGRect, focus: Float, range: Float, radius: Double, shape: String, boost: Double,
+                half: Bool, quality: Quality) -> CGImage? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard image.width > 1, image.height > 1, radius > 0.5, let pic = upload(image, keep: quality != .export),
+              let depthT = depth(scene), let refineT = refine(scene.refine) else { return nil }
+        // the output: the picture's size, or the pyramid's first level (while a finger moves)
+        let ow = half ? pic.half.width : image.width, oh = half ? pic.half.height : image.height
+        guard let map = texture(.r8Unorm, ow, oh), let out = texture(.rgba8Unorm, ow, oh) else { return nil }
+        // the level where the strongest blur is a few pixels across, and the work at that size
+        let target: Double = quality == .export ? 22 : (quality == .live ? 10 : 16)
+        let level = max(0, min(pic.half.mipmapLevelCount - 1, Int(ceil(log2(max(1, radius / 2 / target))))))
+        let lw = max(1, pic.half.width >> level), lh = max(1, pic.half.height >> level)
+        guard let blurred = texture(.rgba16Float, lw, lh) else { return nil }
+        let count = quality == .export ? 160 : (quality == .live ? 48 : 112)
+        var taps = Bokeh.taps(shape, count: count)
+        var params = Params(radius: Float(radius / 2) / Float(1 << level), fullRadius: Float(half ? radius / 2 : radius), boost: Float(boost), count: Int32(taps.count),
+                            catEye: shape == "cateye" ? 1 : 0, level: Float(level))
+        var mp = MapParams(origin: SIMD2(Float(window.minX), Float(window.minY)), span: SIMD2(Float(window.width), Float(window.height)),
+                           focus: focus, half: range / 2, soft: 0.1, refine: scene.refine == nil ? 0 : 1)
+        guard let cmd = queue.makeCommandBuffer(), let e1 = cmd.makeComputeCommandEncoder() else { return nil }
+        e1.setTexture(depthT, index: 0)
+        e1.setTexture(refineT, index: 1)
+        e1.setTexture(map, index: 2)
+        e1.setBytes(&mp, length: MemoryLayout<MapParams>.stride, index: 0)
+        dispatch(e1, mapk, ow, oh)
+        e1.endEncoding()
         guard let e2 = cmd.makeComputeCommandEncoder() else { return nil }
-        e2.setTexture(half, index: 0)
-        e2.setTexture(mapTex, index: 1)
+        e2.setTexture(pic.half, index: 0)
+        e2.setTexture(map, index: 1)
         e2.setTexture(blurred, index: 2)
         e2.setBytes(&params, length: MemoryLayout<Params>.stride, index: 0)
         e2.setBytes(&taps, length: MemoryLayout<SIMD4<Float>>.stride * taps.count, index: 1)
         dispatch(e2, gather, lw, lh)
         e2.endEncoding()
         guard let e3 = cmd.makeComputeCommandEncoder() else { return nil }
-        e3.setTexture(sharp, index: 0)
+        e3.setTexture(half ? pic.half : pic.sharp, index: 0)
         e3.setTexture(blurred, index: 1)
-        e3.setTexture(mapTex, index: 2)
+        e3.setTexture(map, index: 2)
         e3.setTexture(out, index: 3)
         e3.setBytes(&params, length: MemoryLayout<Params>.stride, index: 0)
-        dispatch(e3, composite, w, h)
+        dispatch(e3, half ? compositeHalf : composite, ow, oh)
         e3.endEncoding()
         cmd.commit()
         cmd.waitUntilCompleted()
         guard cmd.status == .completed else { return nil }
-        out.getBytes(&pixels, bytesPerRow: w * 4, from: MTLRegionMake2D(0, 0, w, h), mipmapLevel: 0)
+        var pixels = [UInt8](repeating: 0, count: ow * oh * 4)
+        out.getBytes(&pixels, bytesPerRow: ow * 4, from: MTLRegionMake2D(0, 0, ow, oh), mipmapLevel: 0)
         guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
-        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4, space: image.colorSpace ?? space,
+        return CGImage(width: ow, height: oh, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: ow * 4,
+                       space: image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                        bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue), provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
     }
 
+    /// The pictures kept on the GPU let go (memory is short, the app leaves the screen).
+    func forget() {
+        lock.lock()
+        picture = nil
+        depthTex = nil
+        refineTex = nil
+        lock.unlock()
+    }
+
     private struct Params {
-        /// The strongest blur's radius at the working level (pixels), and at full size.
+        /// The strongest blur's radius at the working level (pixels), and at the output's size.
         var radius: Float
         var fullRadius: Float
         var boost: Float
@@ -564,17 +648,39 @@ final class Bokeh {
         var level: Float
     }
 
+    private struct MapParams {
+        /// The output's part of the whole picture (0…1).
+        var origin: SIMD2<Float>
+        var span: SIMD2<Float>
+        var focus: Float
+        var half: Float
+        var soft: Float
+        var refine: Int32
+    }
+
     private static let source = """
     #include <metal_stdlib>
     using namespace metal;
 
     struct Params { float radius; float fullRadius; float boost; int count; int catEye; float level; };
+    struct MapParams { float2 origin; float2 span; float focus; float half; float soft; int refine; };
 
     inline float3 toLinear(float3 c) { return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878); }
     inline float3 toSRGB(float3 c) {
         c = max(c, 0.0);
         float3 s1 = sqrt(c), s2 = sqrt(s1), s3 = sqrt(s2);
         return 0.662002687 * s1 + 0.684122060 * s2 - 0.323583601 * s3 - 0.0225411470 * c;
+    }
+
+    // a 32-bit float texture, bilinear by hand (not every GPU filters them)
+    inline float bilinear(texture2d<float, access::read> t, float2 p) {
+        float2 sz = float2(t.get_width(), t.get_height());
+        float2 f = clamp(p * sz - 0.5, float2(0.0), sz - 1.0);
+        uint2 i0 = uint2(floor(f));
+        uint2 i1 = min(i0 + 1, uint2(sz) - 1);
+        float2 fr = f - float2(i0);
+        float a = t.read(i0).r, b = t.read(uint2(i1.x, i0.y)).r, c = t.read(uint2(i0.x, i1.y)).r, d = t.read(i1).r;
+        return mix(mix(a, b, fr.x), mix(c, d, fr.x), fr.y);
     }
 
     // the sharp picture at half size, in linear light (each pixel the mean of four)
@@ -586,6 +692,22 @@ final class Bokeh {
         float3 c = toLinear(src.read(min(p, m)).rgb) + toLinear(src.read(min(p + uint2(1, 0), m)).rgb)
                  + toLinear(src.read(min(p + uint2(0, 1), m)).rgb) + toLinear(src.read(min(p + uint2(1, 1), m)).rgb);
         dst.write(float4(c * 0.25, 1), gid);
+    }
+
+    // how much each pixel blurs: its depth against the focal band, then the Refine strokes
+    kernel void mapk(texture2d<float, access::read> depth [[texture(0)]], texture2d<float, access::sample> refine [[texture(1)]],
+                     texture2d<float, access::write> dst [[texture(2)]], constant MapParams& m [[buffer(0)]],
+                     uint2 gid [[thread_position_in_grid]]) {
+        float2 size = float2(dst.get_width(), dst.get_height());
+        if (gid.x >= uint(size.x) || gid.y >= uint(size.y)) return;
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        float2 p = m.origin + (float2(gid) + 0.5) / size * m.span;
+        float b = clamp((abs(bilinear(depth, p) - m.focus) - m.half) / m.soft, 0.0, 1.0);
+        if (m.refine != 0) {
+            float2 r = refine.sample(s, p).rg;
+            b = max(b, r.x) * (1.0 - r.y);
+        }
+        dst.write(float4(b), gid);
     }
 
     kernel void gather(texture2d<float, access::sample> src [[texture(0)]], texture2d<float, access::sample> map [[texture(1)]],
@@ -623,20 +745,9 @@ final class Bokeh {
         dst.write(float4(c, b0), gid);
     }
 
-    // the blur laid over the sharp picture: none where the map is sharp, all of it where a pixel
-    // blurs by more than a couple of pixels; the blurred picture taken from its cells of like
-    // blur (edge-aware), so a sharp subject's colour doesn't bleed out from under it
-    kernel void composite(texture2d<float, access::read> sharp [[texture(0)]], texture2d<float, access::read> blurred [[texture(1)]],
-                          texture2d<float, access::sample> map [[texture(2)]], texture2d<float, access::write> dst [[texture(3)]],
-                          constant Params& p [[buffer(0)]], uint2 gid [[thread_position_in_grid]]) {
-        float2 size = float2(dst.get_width(), dst.get_height());
-        if (gid.x >= uint(size.x) || gid.y >= uint(size.y)) return;
-        constexpr sampler s(filter::linear, address::clamp_to_edge);
-        float2 uv = (float2(gid) + 0.5) / size;
-        float b = map.sample(s, uv).r;
-        float3 a = sharp.read(gid).rgb;
-        float t = clamp((b * p.fullRadius - 0.6) / 2.4, 0.0, 1.0);
-        if (t <= 0.0) { dst.write(float4(a, 1), gid); return; }
+    // the blurred picture from its cells of like blur (edge-aware), so a sharp subject's colour
+    // doesn't bleed out from under it; linear light
+    inline float3 blurAt(texture2d<float, access::read> blurred, float2 uv, float b) {
         float2 bs = float2(blurred.get_width(), blurred.get_height());
         float2 f = uv * bs - 0.5;
         int2 i0 = int2(floor(f));
@@ -653,8 +764,37 @@ final class Bokeh {
             acc += c.rgb * w;
             wsum += w;
         }
-        float3 blur = toSRGB(acc / wsum);
-        dst.write(float4(mix(a, blur, t), 1), gid);
+        return acc / wsum;
+    }
+
+    // the blur laid over the sharp picture: none where the map is sharp, all of it where a pixel
+    // blurs by more than a couple of pixels
+    kernel void composite(texture2d<float, access::read> sharp [[texture(0)]], texture2d<float, access::read> blurred [[texture(1)]],
+                          texture2d<float, access::sample> map [[texture(2)]], texture2d<float, access::write> dst [[texture(3)]],
+                          constant Params& p [[buffer(0)]], uint2 gid [[thread_position_in_grid]]) {
+        float2 size = float2(dst.get_width(), dst.get_height());
+        if (gid.x >= uint(size.x) || gid.y >= uint(size.y)) return;
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        float2 uv = (float2(gid) + 0.5) / size;
+        float b = map.sample(s, uv).r;
+        float3 a = sharp.read(gid).rgb;
+        float t = clamp((b * p.fullRadius - 0.6) / 2.4, 0.0, 1.0);
+        if (t <= 0.0) { dst.write(float4(a, 1), gid); return; }
+        dst.write(float4(mix(a, toSRGB(blurAt(blurred, uv, b)), t), 1), gid);
+    }
+
+    // the same at half size (while a finger moves): the sharp picture is the pyramid's first level
+    kernel void compositeHalf(texture2d<float, access::read> sharp [[texture(0)]], texture2d<float, access::read> blurred [[texture(1)]],
+                              texture2d<float, access::sample> map [[texture(2)]], texture2d<float, access::write> dst [[texture(3)]],
+                              constant Params& p [[buffer(0)]], uint2 gid [[thread_position_in_grid]]) {
+        float2 size = float2(dst.get_width(), dst.get_height());
+        if (gid.x >= uint(size.x) || gid.y >= uint(size.y)) return;
+        constexpr sampler s(filter::linear, address::clamp_to_edge);
+        float2 uv = (float2(gid) + 0.5) / size;
+        float b = map.sample(s, uv).r;
+        float3 a = sharp.read(gid).rgb;
+        float t = clamp((b * p.fullRadius - 0.6) / 2.4, 0.0, 1.0);
+        dst.write(float4(toSRGB(mix(a, blurAt(blurred, uv, b), t)), 1), gid);
     }
     """
 }
