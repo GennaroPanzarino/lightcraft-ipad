@@ -110,6 +110,14 @@ for line in log.splitlines():
     if "lightcraft" in line.lower() and any(k in line for k in ("renderer", "editor", "bench", "export", "lensblur", "stress", "op:", "region", "error", "Error")):
         print(line[:300])
 
+# the lens blur must run on Metal (its Core Image fallback is many times slower)
+if "lightcraft lensblur: Metal unavailable" in log:
+    print("FAIL: the lens blur's Metal renderer did not start")
+    for line in log.splitlines():
+        if "Metal unavailable" in line:
+            print(line[-600:])
+    sys.exit(1)
+
 # the stress run must have finished, and nothing may have crashed
 if "lightcraft stress: done" not in log:
     print("FAIL: the stress run did not finish")

@@ -466,10 +466,22 @@ final class Bokeh {
     private var noRefine: MTLTexture?
 
     private init?() {
-        guard let d = MTLCreateSystemDefaultDevice(), let q = d.makeCommandQueue(),
-              let lib = try? d.makeLibrary(source: Bokeh.source, options: nil) else { return nil }
+        guard let d = MTLCreateSystemDefaultDevice(), let q = d.makeCommandQueue() else {
+            NSLog("lightcraft lensblur: Metal unavailable (no device)")
+            return nil
+        }
+        let lib: MTLLibrary
+        do {
+            lib = try d.makeLibrary(source: Bokeh.source, options: nil)
+        } catch {
+            NSLog("lightcraft lensblur: Metal unavailable (\(error))")
+            return nil
+        }
         func pipe(_ name: String) -> MTLComputePipelineState? { lib.makeFunction(name: name).flatMap { try? d.makeComputePipelineState(function: $0) } }
-        guard let a = pipe("prepare"), let m = pipe("mapk"), let b = pipe("gather"), let c = pipe("composite"), let h = pipe("compositeHalf") else { return nil }
+        guard let a = pipe("prepare"), let m = pipe("mapk"), let b = pipe("gather"), let c = pipe("composite"), let h = pipe("compositeHalf") else {
+            NSLog("lightcraft lensblur: Metal unavailable (a kernel)")
+            return nil
+        }
         device = d
         queue = q
         prepare = a
@@ -663,7 +675,7 @@ final class Bokeh {
     using namespace metal;
 
     struct Params { float radius; float fullRadius; float boost; int count; int catEye; float level; };
-    struct MapParams { float2 origin; float2 span; float focus; float half; float soft; int refine; };
+    struct MapParams { float2 origin; float2 span; float focus; float halfRange; float soft; int refine; };
 
     inline float3 toLinear(float3 c) { return c * (c * (c * 0.305306011 + 0.682171111) + 0.012522878); }
     inline float3 toSRGB(float3 c) {
@@ -702,7 +714,7 @@ final class Bokeh {
         if (gid.x >= uint(size.x) || gid.y >= uint(size.y)) return;
         constexpr sampler s(filter::linear, address::clamp_to_edge);
         float2 p = m.origin + (float2(gid) + 0.5) / size * m.span;
-        float b = clamp((abs(bilinear(depth, p) - m.focus) - m.half) / m.soft, 0.0, 1.0);
+        float b = clamp((abs(bilinear(depth, p) - m.focus) - m.halfRange) / m.soft, 0.0, 1.0);
         if (m.refine != 0) {
             float2 r = refine.sample(s, p).rg;
             b = max(b, r.x) * (1.0 - r.y);
