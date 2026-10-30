@@ -375,7 +375,8 @@ private struct BrowserTile: View {
                     .padding(7)
             }
         }
-        .overlay(Rectangle().strokeBorder(selected ? Lc.select : (current ? Lc.hairline2 : Color.clear), lineWidth: selected ? 2 : 1))
+        // the chosen photo outlined dark (a light frame shouted over the photos)
+        .overlay(Rectangle().strokeBorder(selected ? Color.black.opacity(0.85) : (current ? Color.black.opacity(0.5) : Color.clear), lineWidth: selected ? 3 : 1.5))
     }
 }
 

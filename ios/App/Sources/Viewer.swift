@@ -32,6 +32,9 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
     private var current: CGImage?
     private var held: CGImage?
     private var fitted = CGSize.zero
+    /// The shape the photo is fitted for, and the box it is fitted in.
+    private var fittedAspect: CGFloat = 0
+    private var fittedBox = CGSize.zero
     private var paging: UIPanGestureRecognizer!
     private var taps: UITapGestureRecognizer!
     private var sideImage: CGImage?
@@ -70,7 +73,9 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         scroll.decelerationRate = .fast
         scroll.backgroundColor = .clear
         addSubview(scroll)
-        imageView.contentMode = .scaleAspectFit
+        // (fitted to the picture's shape by its frame; a picture a pixel off that shape fills it
+        // rather than shifting inside it)
+        imageView.contentMode = .scaleToFill
         imageView.isUserInteractionEnabled = true
         imageView.layer.minificationFilter = .trilinear
         scroll.addSubview(imageView)
@@ -180,10 +185,18 @@ final class PhotoViewer: UIView, UIScrollViewDelegate, UIGestureRecognizerDelega
         return b.width / max(1, b.height) > a ? CGSize(width: b.height * a, height: b.height) : CGSize(width: b.width, height: b.width / a)
     }
 
+    /// The photo fitted to the box again, only when its shape or the box really changed: pictures of
+    /// one photo differ by a pixel in their proportions (a half-size draft, the depth view, the
+    /// thumbnail), and fitting again for that reset the zoom and moved the photo under the finger.
     private func layoutImage(force: Bool) {
         guard let img = imageView.image, bounds.width > 0, bounds.height > 0 else { return }
         let f = fit(img.size)
-        if force || abs(f.width - fitted.width) > 0.5 || abs(f.height - fitted.height) > 0.5 {
+        let a = img.size.width / max(1, img.size.height)
+        let sameBox = abs(bounds.width - fittedBox.width) < 0.5 && abs(bounds.height - fittedBox.height) < 0.5
+        let sameShape = fittedAspect > 0 && abs(a / fittedAspect - 1) < 0.006
+        if force || !sameBox || !sameShape {
+            fittedAspect = a
+            fittedBox = bounds.size
             stopZoom()
             fitted = f
             let zoom = scroll.zoomScale
