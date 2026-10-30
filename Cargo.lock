@@ -3717,7 +3717,6 @@ dependencies = [
  "android_logger",
  "jni 0.21.1",
  "libc",
- "lightcraft-codecs",
  "lightcraft-engine",
  "lightcraft-pipeline",
  "log",
